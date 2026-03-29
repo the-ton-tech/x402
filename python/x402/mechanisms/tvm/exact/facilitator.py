@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import queue
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from ....schemas import (
     Network,
@@ -25,6 +27,7 @@ from ..constants import (
     DEFAULT_SETTLEMENT_BATCH_FLUSH_INTERVAL_SECONDS,
     DEFAULT_SETTLEMENT_BATCH_FLUSH_SIZE,
     DEFAULT_SETTLEMENT_BATCH_MAX_SIZE,
+    DEFAULT_STREAMING_CONFIRMATION_TIMEOUT_SECONDS,
     ERR_DUPLICATE_SETTLEMENT,
     ERR_INSUFFICIENT_BALANCE,
     ERR_INVALID_AMOUNT,
@@ -66,9 +69,18 @@ class _QueuedSettlement:
     network: str
     payer: str
     settlement_hash: str
+    settlement: ParsedTvmSettlement
+    requirements: PaymentRequirements
     relay_request: TvmRelayRequest
     completed: threading.Event = field(default_factory=threading.Event)
     result: _BatchResult | None = None
+
+
+@dataclass
+class _PendingConfirmation:
+    network: str
+    batch: list[_QueuedSettlement]
+    transaction: str
 
 
 class _SettlementBatcher:
@@ -78,19 +90,32 @@ class _SettlementBatcher:
         *,
         flush_interval_seconds: float,
         flush_batch_size: int,
+        confirmation_timeout_seconds: float,
         _delete_settlement_cache: Callable[[str], None],
     ) -> None:
         self._signer = signer
         self._flush_interval_seconds = flush_interval_seconds
         self._flush_batch_size = flush_batch_size
         self._max_batch_size = DEFAULT_SETTLEMENT_BATCH_MAX_SIZE
+        self._confirmation_timeout_seconds = confirmation_timeout_seconds
         self._delete_settlement_cache = _delete_settlement_cache
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
+        self._confirmation_queue: queue.SimpleQueue[_PendingConfirmation] = queue.SimpleQueue()
         self._queues: dict[str, list[_QueuedSettlement]] = {}
         self._deadlines: dict[str, float] = {}
         self._worker = threading.Thread(target=self._run, name="tvm-settlement-batcher", daemon=True)
         self._worker.start()
+        self._confirmation_workers = [
+            threading.Thread(
+                target=self._run_confirmation_worker,
+                name=f"tvm-settlement-confirmation-{idx}",
+                daemon=True,
+            )
+            for idx in range(4)
+        ]
+        for worker in self._confirmation_workers:
+            worker.start()
 
     def enqueue(self, queued_settlement: _QueuedSettlement) -> _BatchResult:
         with self._condition:
@@ -103,6 +128,7 @@ class _SettlementBatcher:
             self._condition.notify_all()
 
         queued_settlement.completed.wait()
+        assert queued_settlement.result is not None
         return queued_settlement.result
 
     def _run(self) -> None:
@@ -140,22 +166,69 @@ class _SettlementBatcher:
                 network,
                 [queued.relay_request for queued in batch],
             )
-            result = _BatchResult(
-                success=True,
-                transaction=self._signer.send_external_message(network, external_boc),
-            )
+            trace_external_hash_norm = self._signer.send_external_message(network, external_boc)
         except Exception as exc:
-            result = _BatchResult(
-                success=False,
-                error_reason=ERR_SIMULATION_FAILED if isinstance(exc, ValueError) else ERR_TRANSACTION_FAILED,
-                error_message=str(exc),
-            )
             for queued in batch:
                 self._delete_settlement_cache(queued.settlement_hash)
+            for queued in batch:
+                queued.result = _BatchResult(
+                    success=False,
+                    transaction="",
+                    error_reason=ERR_SIMULATION_FAILED if isinstance(exc, ValueError) else ERR_TRANSACTION_FAILED,
+                    error_message=str(exc),
+                )
+                queued.completed.set()
+            return
 
-        for queued in batch:
-            queued.result = result
-            queued.completed.set()
+        self._confirmation_queue.put(
+            _PendingConfirmation(
+                network=network,
+                batch=batch,
+                transaction=trace_external_hash_norm,
+            )
+        )
+
+    def _run_confirmation_worker(self) -> None:
+        while True:
+            pending = self._confirmation_queue.get()
+            try:
+                finalized_trace = self._signer.wait_for_trace_confirmation(
+                    pending.network,
+                    pending.transaction,
+                    timeout_seconds=self._confirmation_timeout_seconds,
+                )
+            except Exception as exc:
+                for queued in pending.batch:
+                    self._delete_settlement_cache(queued.settlement_hash)
+                    queued.result = _BatchResult(
+                        success=False,
+                        transaction=pending.transaction,
+                        error_reason=ERR_SIMULATION_FAILED if isinstance(exc, ValueError) else ERR_TRANSACTION_FAILED,
+                        error_message=str(exc),
+                    )
+                    queued.completed.set()
+                continue
+
+            for queued in pending.batch:
+                try:
+                    ExactTvmScheme._verify_trace_actions(
+                        finalized_trace,
+                        settlement=queued.settlement,
+                        requirements=queued.requirements,
+                    )
+                    queued.result = _BatchResult(
+                        success=True,
+                        transaction=pending.transaction,
+                    )
+                except Exception as exc:
+                    self._delete_settlement_cache(queued.settlement_hash)
+                    queued.result = _BatchResult(
+                        success=False,
+                        transaction=pending.transaction,
+                        error_reason=ERR_TRANSACTION_FAILED,
+                        error_message=str(exc),
+                    )
+                queued.completed.set()
 
 
 class ExactTvmScheme:
@@ -170,6 +243,7 @@ class ExactTvmScheme:
         *,
         batch_flush_interval_seconds: float = DEFAULT_SETTLEMENT_BATCH_FLUSH_INTERVAL_SECONDS,
         batch_max_size: int = DEFAULT_SETTLEMENT_BATCH_FLUSH_SIZE,
+        streaming_confirmation_timeout_seconds: float = DEFAULT_STREAMING_CONFIRMATION_TIMEOUT_SECONDS,
     ) -> None:
         self._signer = signer
         self._settlement_cache: dict[str, float] = {}
@@ -178,6 +252,7 @@ class ExactTvmScheme:
             signer,
             flush_interval_seconds=batch_flush_interval_seconds,
             flush_batch_size=batch_max_size,
+            confirmation_timeout_seconds=streaming_confirmation_timeout_seconds,
             _delete_settlement_cache=self._delete_settlement_cache,
         )
 
@@ -248,6 +323,8 @@ class ExactTvmScheme:
                     network=str(requirements.network),
                     payer=settlement.payer,
                     settlement_hash=settlement.settlement_hash,
+                    settlement=settlement,
+                    requirements=requirements,
                     relay_request=relay_request,
                 )
             )
@@ -290,7 +367,7 @@ class ExactTvmScheme:
 
         if int(payload.accepted.amount) != int(requirements.amount):
             return (VerifyResponse(is_valid=False, invalid_reason=ERR_INVALID_AMOUNT, payer=settlement.payer), None)
-        
+
         if normalize_address(payload.accepted.asset) != normalize_address(requirements.asset):
             return (VerifyResponse(is_valid=False, invalid_reason=ERR_INVALID_ASSET, payer=settlement.payer), None)
 
@@ -336,7 +413,7 @@ class ExactTvmScheme:
                 init_data_parsed = parse_active_w5_account_state(account)
             except RuntimeError:
                 return (VerifyResponse(is_valid=False, invalid_reason=ERR_INVALID_CODE_HASH, payer=payer), None)
-            
+
         if not init_data_parsed.signature_allowed:
             return (VerifyResponse(is_valid=False, invalid_reason=ERR_INVALID_SIGNATURE_MODE, payer=payer), None)
         if init_data_parsed.seqno != settlement.seqno:
@@ -370,7 +447,7 @@ class ExactTvmScheme:
                 for_emulation=True,
             )
             emulation = self._signer.emulate_external_message(requirements.network, external_boc)
-            self._verify_relay_emulation(emulation, settlement=settlement, requirements=requirements)
+            self._verify_trace_actions(emulation, settlement=settlement, requirements=requirements)
         except Exception as e:
             return (
                 VerifyResponse(
@@ -407,16 +484,16 @@ class ExactTvmScheme:
         for key in expired:
             del self._settlement_cache[key]
 
-    def _verify_relay_emulation(
-        self,
-        emulate_trace: dict[str, object],
+    @staticmethod
+    def _verify_trace_actions(
+        trace_data: dict[str, object],
         *,
         settlement: ParsedTvmSettlement,
         requirements: PaymentRequirements,
     ) -> None:
-        actions = emulate_trace.get("actions")
+        actions = trace_data.get("actions")
         if not isinstance(actions, list):
-            raise ValueError("Toncenter emulateTrace did not return actions")
+            raise ValueError("Toncenter trace did not return actions")
 
         expected_asset = normalize_address(requirements.asset)
         expected_receiver = normalize_address(requirements.pay_to)
@@ -448,6 +525,6 @@ class ExactTvmScheme:
                 or amount != expected_amount
             ):
                 continue
-            return {"action": action, "details": details}
+            return
 
-        raise ValueError("emulateTrace does not contain a successful jetton transfer to the merchant")
+        raise ValueError("Trace actions do not contain a successful jetton transfer to the merchant")

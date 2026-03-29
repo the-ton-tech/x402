@@ -113,6 +113,29 @@ class ToncenterV3Client:
             raise RuntimeError("Toncenter returned an invalid emulateTrace response")
         return response
 
+    def has_finalized_transaction_by_message_hash(self, message_hash: str) -> bool:
+        response = self._request(
+            "GET",
+            "/api/v3/transactionsByMessage",
+            params={
+                "msg_hash": message_hash,
+                "limit": 1,
+                "offset": 0,
+                "direction": "in",
+            },
+        )
+        transactions = response.get("transactions")
+        if not isinstance(transactions, list):
+            raise RuntimeError("Toncenter returned an invalid transactionsByMessage response")
+
+        for transaction in transactions:
+            if not isinstance(transaction, dict):
+                continue
+            finality = transaction.get("finality")
+            if finality in {2, "finalized"}:
+                return True
+        return False
+
     def run_get_method(
         self,
         address: str,

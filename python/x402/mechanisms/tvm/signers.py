@@ -30,8 +30,13 @@ from .constants import (
     DEFAULT_W5R1_SUBWALLET_NUMBER,
     HIGHLOAD_V3_CODE_HASH,
     HIGHLOAD_V3_CODE_HEX,
+    TONCENTER_MAINNET_BASE_URL,
+    TONCENTER_TESTNET_BASE_URL,
+    TVM_MAINNET,
+    TVM_TESTNET,
 )
 from .provider import ToncenterV3Client
+from .streaming import ToncenterStreamingSseClient, ToncenterStreamingWatcher
 from .types import TvmAccountState, TvmJettonWalletData, TvmRelayRequest
 
 try:
@@ -52,10 +57,10 @@ class HighloadV3Config:
 
     secret_key: bytes
     api_key: str | None = None
-    base_url: str | None = None
     subwallet_id: int = DEFAULT_HIGHLOAD_SUBWALLET_ID
     timeout: int = DEFAULT_HIGHLOAD_TIMEOUT
     relay_amount: int = DEFAULT_RELAY_AMOUNT
+    toncenter_base_url: str | None = None
     toncenter_timeout_seconds: float = DEFAULT_TONCENTER_TIMEOUT_SECONDS
     workchain: int = 0
 
@@ -167,14 +172,19 @@ class FacilitatorHighloadV3Signer:
     def __init__(self, configs: dict[str, HighloadV3Config]) -> None:
         self._configs = dict(configs)
         self._clients: dict[str, ToncenterV3Client] = {}
+        self._streaming_clients: dict[str, ToncenterStreamingSseClient] = {}
+        self._streaming_watchers: dict[str, ToncenterStreamingWatcher] = {}
+        self._cached_facilitator_states: dict[str, TvmAccountState] = {}
+        self._facilitator_state_dirty: dict[str, bool] = {}
         self._wallets: dict[str, _WalletContext] = {}
         self._query_ids: dict[str, int] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
         for network, config in self._configs.items():
             context = _WalletContext.from_config(config)
             self._wallets[network] = context
             self._query_ids[network] = randbelow(MAX_USABLE_QUERY_SEQNO + 1)
+            self._facilitator_state_dirty[network] = True
 
     def get_addresses(self) -> list[str]:
         """Get all facilitator wallet addresses."""
@@ -182,6 +192,9 @@ class FacilitatorHighloadV3Signer:
 
     def get_account_state(self, address: str, network: str) -> TvmAccountState:
         """Get current account state."""
+        normalized_address = normalize_address(address)
+        if normalized_address == self._wallets[network].address:
+            return self._get_facilitator_account_state(network)
         return self._client(network).get_account_state(address)
 
     def build_relay_external_boc(
@@ -261,7 +274,22 @@ class FacilitatorHighloadV3Signer:
 
     def send_external_message(self, network: str, external_boc: bytes) -> str:
         """Broadcast a prepared external message via Toncenter."""
+        self._ensure_streaming_watcher(network)
         return self._client(network).send_message(external_boc)
+
+    def wait_for_trace_confirmation(
+        self,
+        network: str,
+        trace_external_hash_norm: str,
+        *,
+        timeout_seconds: float,
+    ) -> dict[str, object]:
+        """Wait until the submitted trace reaches finalized."""
+        self._ensure_streaming_watcher(network)
+        return self._streaming_client(network).wait_for_trace_confirmation(
+            trace_external_hash_norm=trace_external_hash_norm,
+            timeout_seconds=timeout_seconds,
+        )
 
     def get_jetton_wallet_data(self, address: str, network: str) -> TvmJettonWalletData:
         """Read TEP-74 jetton wallet data."""
@@ -273,14 +301,54 @@ class FacilitatorHighloadV3Signer:
             self._clients[network] = ToncenterV3Client(
                 network,
                 api_key=config.api_key,
-                base_url=config.base_url,
+                base_url=config.toncenter_base_url,
                 timeout=config.toncenter_timeout_seconds,
             )
         return self._clients[network]
 
+    def _streaming_client(self, network: str) -> ToncenterStreamingSseClient:
+        if network not in self._streaming_clients:
+            config = self._configs[network]
+            self._streaming_clients[network] = ToncenterStreamingSseClient(
+                base_url=(config.toncenter_base_url or _default_streaming_base_url(network)),
+                api_key=config.api_key,
+            )
+        return self._streaming_clients[network]
+
+    def _get_facilitator_account_state(self, network: str) -> TvmAccountState:
+        """We cache the account state of the facilitator. The cache is invalidated when an event arrives from the StreamingAPI."""
+        facilitator_address = self._wallets[network].address
+
+        self._ensure_streaming_watcher(network)
+        with self._lock:
+            cached_state = self._cached_facilitator_states.get(network)
+            is_dirty = self._facilitator_state_dirty.get(network, True)
+        if cached_state is not None and not is_dirty:
+            return cached_state
+
+        refreshed_state = self._client(network).get_account_state(facilitator_address)
+        with self._lock:
+            self._cached_facilitator_states[network] = refreshed_state
+            self._facilitator_state_dirty[network] = False
+        return refreshed_state
+
+    def _ensure_streaming_watcher(self, network: str) -> None:
+        with self._lock:
+            if network in self._streaming_watchers:
+                return
+            watcher = self._streaming_client(network).start_account_state_watcher(
+                address=self._wallets[network].address,
+                on_invalidate=lambda: self._mark_facilitator_state_dirty(network),
+            )
+            self._streaming_watchers[network] = watcher
+
+    def _mark_facilitator_state_dirty(self, network: str) -> None:
+        with self._lock:
+            self._facilitator_state_dirty[network] = True
+
     def _pack_actions_message(
         self,
-        wallet_context: "_WalletContext",
+        wallet_context: _WalletContext,
         actions: list[Cell],
         query_id: int,
     ) -> Cell:
@@ -353,39 +421,10 @@ class _WalletContext:
             deployed=None,
         )
 
-_seqno_to_query_id = seqno_to_query_id
 
-
-def _transaction_failed(tx: dict[str, object]) -> bool:
-    description = tx.get("description")
-    if not isinstance(description, dict):
-        return False
-
-    if description.get("aborted") is True:
-        return True
-
-    compute_phase = description.get("compute_ph")
-    if isinstance(compute_phase, dict) and compute_phase.get("success") is False:
-        return True
-
-    action_phase = description.get("action")
-    if isinstance(action_phase, dict) and action_phase.get("success") is False:
-        return True
-
-    return False
-
-
-def _format_transaction_failure(tx: dict[str, object]) -> str:
-    description = tx.get("description")
-    if not isinstance(description, dict):
-        return "Highload V3 transaction failed"
-
-    compute_phase = description.get("compute_ph")
-    if isinstance(compute_phase, dict) and compute_phase.get("exit_code") is not None:
-        return f"Highload V3 transaction failed with compute exit code {compute_phase['exit_code']}"
-
-    action_phase = description.get("action")
-    if isinstance(action_phase, dict) and action_phase.get("result_code") is not None:
-        return f"Highload V3 transaction failed with action result code {action_phase['result_code']}"
-
-    return "Highload V3 transaction failed"
+def _default_streaming_base_url(network: str) -> str:
+    if network == TVM_MAINNET:
+        return TONCENTER_MAINNET_BASE_URL
+    if network == TVM_TESTNET:
+        return TONCENTER_TESTNET_BASE_URL
+    raise ValueError(f"Unsupported TVM network: {network}")

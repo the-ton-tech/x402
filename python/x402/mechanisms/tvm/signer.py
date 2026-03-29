@@ -7,7 +7,6 @@ from typing import Protocol
 from .types import TvmAccountState, TvmJettonWalletData, TvmRelayRequest
 
 try:
-    from pytoniq_core import Cell
     from pytoniq_core.tlb.account import StateInit
 except ImportError as e:
     raise ImportError(
@@ -50,6 +49,16 @@ class FacilitatorTvmSigner(Protocol):
 
     def send_external_message(self, network: str, external_boc: bytes) -> str:
         """Broadcast a prepared external message through Toncenter."""
+        ...
+
+    def wait_for_trace_confirmation(
+        self,
+        network: str,
+        trace_external_hash_norm: str,
+        *,
+        timeout_seconds: float,
+    ) -> dict[str, object]:
+        """Wait until a submitted trace reaches finalized and return its payload."""
         ...
 
     def get_jetton_wallet_data(self, address: str, network: str) -> TvmJettonWalletData:
