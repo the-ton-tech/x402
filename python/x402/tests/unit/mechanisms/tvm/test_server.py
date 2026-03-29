@@ -1,0 +1,16 @@
+"""Tests for TVM exact server price normalization."""
+
+from __future__ import annotations
+
+from x402.mechanisms.tvm.constants import TVM_MAINNET, USDT_MAINNET_MINTER
+from x402.mechanisms.tvm.exact.server import ExactTvmScheme
+
+
+def test_parse_price_preserves_atomic_units_without_float_rounding_loss():
+    scheme = ExactTvmScheme()
+
+    result = scheme.parse_price("2.01", TVM_MAINNET)
+
+    assert result.amount == "2010000"
+    assert result.asset == USDT_MAINNET_MINTER
+    assert result.extra == {"areFeesSponsored": True}

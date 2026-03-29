@@ -144,6 +144,10 @@ class ToncenterStreamingWatcher:
         self._close_stream()
         self._thread.join(timeout=1.0)
 
+    def is_alive(self) -> bool:
+        """Report whether the watcher thread is still running."""
+        return self._thread.is_alive()
+
 
 class ToncenterStreamingSseClient:
     """Shared SSE client for Toncenter Streaming API v2."""
@@ -178,6 +182,9 @@ class ToncenterStreamingSseClient:
         """Start one shared stream on the facilitator address."""
         normalized_address = normalize_address(address)
         with self._lock:
+            if self._watcher is not None and not self._watcher.is_alive():
+                self._watcher = None
+                self._watched_address = None
             if self._watcher is not None:
                 if self._watched_address != normalized_address:
                     raise RuntimeError(
@@ -204,9 +211,17 @@ class ToncenterStreamingSseClient:
         thread.start()
         if not startup_state.ready_event.wait(timeout=DEFAULT_STREAMING_START_TIMEOUT_SECONDS):
             watcher.close()
+            with self._lock:
+                if self._watcher is watcher:
+                    self._watcher = None
+                    self._watched_address = None
             raise RuntimeError("Toncenter facilitator account stream did not become ready in time")
         if startup_state.error is not None:
             watcher.close()
+            with self._lock:
+                if self._watcher is watcher:
+                    self._watcher = None
+                    self._watched_address = None
             raise RuntimeError("Toncenter facilitator account stream failed to start") from startup_state.error
         return watcher
 
@@ -274,10 +289,10 @@ class ToncenterStreamingSseClient:
             except Exception as exc:
                 if not startup_state.ready_event.is_set():
                     startup_state.fail(exc)
+                    break
                 if stop_event.is_set():
                     break
                 on_invalidate()
-                self._fail_pending_waiters(exc)
                 stop_event.wait(DEFAULT_STREAMING_RECONNECT_BACKOFF_SECONDS)
 
     def _consume_stream(

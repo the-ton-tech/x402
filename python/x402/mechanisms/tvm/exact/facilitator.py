@@ -34,6 +34,7 @@ from ..constants import (
     ERR_INVALID_ASSET,
     ERR_INVALID_CODE_HASH,
     ERR_INVALID_EXTENSIONS_DICT,
+    ERR_INVALID_JETTON_TRANSFER,
     ERR_INVALID_RECIPIENT,
     ERR_INVALID_SEQNO,
     ERR_INVALID_SIGNATURE,
@@ -295,9 +296,27 @@ class ExactTvmScheme:
         context=None,
     ) -> SettleResponse:
         """Settle a TON exact payment payload."""
-        tvm_payload = ExactTvmPayload.from_dict(payload.payload)
-        settlement = parse_exact_tvm_payload(tvm_payload.settlement_boc)
-        verification, relay_request = self._verify(payload, requirements, tvm_payload, settlement)
+        try:
+            tvm_payload = ExactTvmPayload.from_dict(payload.payload)
+            settlement = parse_exact_tvm_payload(tvm_payload.settlement_boc)
+            verification, relay_request = self._verify(payload, requirements, tvm_payload, settlement)
+        except ValueError as e:
+            return SettleResponse(
+                success=False,
+                error_reason=str(e),
+                payer="",
+                transaction="",
+                network=requirements.network,
+            )
+        except Exception as e:
+            return SettleResponse(
+                success=False,
+                error_reason=ERR_SIMULATION_FAILED,
+                error_message=str(e),
+                payer="",
+                transaction="",
+                network=requirements.network,
+            )
         if not verification.is_valid:
             return SettleResponse(
                 success=False,
@@ -387,6 +406,9 @@ class ExactTvmScheme:
 
         if settlement.transfer.jetton_amount != int(requirements.amount):
             return (VerifyResponse(is_valid=False, invalid_reason=ERR_INVALID_AMOUNT, payer=payer), None)
+        
+        if settlement.transfer.forward_ton_amount > 1 or settlement.transfer.response_destination != normalize_address(requirements.pay_to):
+            return (VerifyResponse(is_valid=False, invalid_reason=ERR_INVALID_JETTON_TRANSFER, payer=payer), None)
 
         now = int(time.time())
         if settlement.valid_until <= now:

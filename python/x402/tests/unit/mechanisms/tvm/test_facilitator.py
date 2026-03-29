@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import threading
 
 import pytest
 
 pytest.importorskip("pytoniq_core")
 
-from x402.mechanisms.tvm import TVM_TESTNET
+from x402.mechanisms.tvm import (
+    ERR_INVALID_JETTON_TRANSFER,
+    ERR_INVALID_RECIPIENT,
+    ERR_INVALID_SETTLEMENT_BOC,
+    TVM_TESTNET,
+)
 from x402.mechanisms.tvm.exact.facilitator import ExactTvmScheme
 from x402.mechanisms.tvm.types import ParsedJettonTransfer, ParsedTvmSettlement, TvmRelayRequest
 from x402.schemas import PaymentPayload, PaymentRequirements, ResourceInfo, VerifyResponse
@@ -224,3 +230,58 @@ def test_settle_batch_marks_each_settlement_individually(monkeypatch):
     assert second.success is False
     assert second.transaction == "trace-hash-1"
     assert second.error_reason == "transaction_failed"
+
+
+def test_settle_returns_structured_error_for_invalid_payload(monkeypatch):
+    scheme = ExactTvmScheme(MockSigner({}), batch_flush_interval_seconds=0.0, batch_max_size=1)
+    monkeypatch.setattr(
+        "x402.mechanisms.tvm.exact.facilitator.parse_exact_tvm_payload",
+        lambda settlement_boc: (_ for _ in ()).throw(ValueError(ERR_INVALID_SETTLEMENT_BOC)),
+    )
+
+    response = scheme.settle(_make_payload("bad-boc", amount="100"), _make_requirements(amount="100"))
+
+    assert response.success is False
+    assert response.error_reason == ERR_INVALID_SETTLEMENT_BOC
+    assert response.transaction == ""
+    assert response.payer == ""
+
+
+def test_verify_rejects_forward_ton_amount_above_one(monkeypatch):
+    settlement = replace(
+        _make_settlement(settlement_hash="settlement-1", source_wallet=SOURCE_WALLET_1, amount=100),
+        transfer=replace(
+            _make_settlement(settlement_hash="settlement-1", source_wallet=SOURCE_WALLET_1, amount=100).transfer,
+            forward_ton_amount=2,
+        ),
+    )
+    scheme = ExactTvmScheme(MockSigner({}), batch_flush_interval_seconds=0.0, batch_max_size=1)
+    monkeypatch.setattr(
+        "x402.mechanisms.tvm.exact.facilitator.parse_exact_tvm_payload",
+        lambda settlement_boc: settlement,
+    )
+
+    response = scheme.verify(_make_payload("boc-1", amount="100"), _make_requirements(amount="100"))
+
+    assert response.is_valid is False
+    assert response.invalid_reason == ERR_INVALID_JETTON_TRANSFER
+
+
+def test_verify_rejects_mismatched_response_destination(monkeypatch):
+    settlement = replace(
+        _make_settlement(settlement_hash="settlement-1", source_wallet=SOURCE_WALLET_1, amount=100),
+        transfer=replace(
+            _make_settlement(settlement_hash="settlement-1", source_wallet=SOURCE_WALLET_1, amount=100).transfer,
+            response_destination=PAYER,
+        ),
+    )
+    scheme = ExactTvmScheme(MockSigner({}), batch_flush_interval_seconds=0.0, batch_max_size=1)
+    monkeypatch.setattr(
+        "x402.mechanisms.tvm.exact.facilitator.parse_exact_tvm_payload",
+        lambda settlement_boc: settlement,
+    )
+
+    response = scheme.verify(_make_payload("boc-1", amount="100"), _make_requirements(amount="100"))
+
+    assert response.is_valid is False
+    assert response.invalid_reason == ERR_INVALID_JETTON_TRANSFER

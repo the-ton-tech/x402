@@ -82,7 +82,7 @@ class ExactTvmScheme:
 
     def _default_money_conversion(self, amount: float, network: str) -> AssetAmount:
         return AssetAmount(
-            amount=str(int(amount * (10**DEFAULT_DECIMALS))),
+            amount=str(parse_amount(str(amount), DEFAULT_DECIMALS)),
             asset=self._get_default_asset(network),
             extra={"areFeesSponsored": True},
         )

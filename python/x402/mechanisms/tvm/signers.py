@@ -334,8 +334,11 @@ class FacilitatorHighloadV3Signer:
 
     def _ensure_streaming_watcher(self, network: str) -> None:
         with self._lock:
-            if network in self._streaming_watchers:
+            existing_watcher = self._streaming_watchers.get(network)
+            if existing_watcher is not None and existing_watcher.is_alive():
                 return
+            if existing_watcher is not None:
+                self._streaming_watchers.pop(network, None)
             watcher = self._streaming_client(network).start_account_state_watcher(
                 address=self._wallets[network].address,
                 on_invalidate=lambda: self._mark_facilitator_state_dirty(network),
