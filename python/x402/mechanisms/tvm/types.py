@@ -88,6 +88,14 @@ class TvmJettonWalletData:
     wallet_code: Cell
 
 
+@dataclass
+class TvmRelayRequest:
+    """One relay request forwarded by the facilitator highload wallet."""
+
+    destination: str
+    body: Cell
+    state_init: StateInit | None
+
 
 @dataclass
 class W5InitData:

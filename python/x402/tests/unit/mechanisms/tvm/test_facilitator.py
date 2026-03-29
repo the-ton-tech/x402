@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import base64
+import threading
 import time
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from nacl.bindings import crypto_sign_seed_keypair
 from pytoniq.contract.contract import Contract
@@ -13,18 +15,24 @@ from pytoniq_core.crypto.signature import sign_message
 from pytoniq_core.tlb.account import StateInit
 
 from x402.mechanisms.tvm.constants import (
+    DEFAULT_JETTON_WALLET_MESSAGE_AMOUNT,
     ERR_DUPLICATE_SETTLEMENT,
     ERR_INVALID_RECIPIENT,
     ERR_SIMULATION_FAILED,
-    ERR_STATE_INIT_NOT_SUPPORTED,
     JETTON_TRANSFER_OPCODE,
+    SEND_MODE_PAY_FEES_SEPARATELY,
     TVM_MAINNET,
     W5_INTERNAL_SIGNED_OPCODE,
 )
 from x402.mechanisms.tvm.exact.facilitator import ExactTvmScheme
-from x402.mechanisms.tvm.types import TvmJettonWalletData
-from x402.mechanisms.tvm.utils import build_w5r1_state_init
-from x402.schemas import PaymentPayload, PaymentRequirements
+from x402.mechanisms.tvm.types import (
+    ParsedJettonTransfer,
+    ParsedTvmSettlement,
+    TvmJettonWalletData,
+    TvmRelayRequest,
+)
+from x402.mechanisms.tvm.utils import build_w5r1_state_init, serialize_out_list, serialize_send_msg_action
+from x402.schemas import PaymentPayload, PaymentRequirements, VerifyResponse
 
 SOURCE_JETTON_WALLET = "0:" + "22" * 32
 JETTON_MASTER = "0:" + "33" * 32
@@ -47,7 +55,8 @@ class FakeSigner:
         self._is_active = is_active
         self._merchant_wallet_tx_success = merchant_wallet_tx_success
         self._include_merchant_wallet_tx = include_merchant_wallet_tx
-        self.built: list[tuple[str, str, StateInit | None]] = []
+        self.built: list[tuple[str, TvmRelayRequest, bool]] = []
+        self.batch_built: list[tuple[str, list[TvmRelayRequest]]] = []
         self.sent: list[tuple[str, bytes]] = []
 
     def get_addresses(self) -> list[str]:
@@ -75,15 +84,24 @@ class FakeSigner:
     def build_relay_external_boc(
         self,
         network: str,
-        destination: str,
-        body: Cell,
-        state_init: StateInit | None,
+        relay_request: TvmRelayRequest,
+        *,
+        for_emulation: bool = False,
     ) -> bytes:
-        _ = body
-        self.built.append((network, destination, state_init))
-        if state_init is not None:
+        self.built.append((network, relay_request, for_emulation))
+        if relay_request.state_init is not None:
             raise RuntimeError("state_init is not supported")
         return b"external-boc"
+
+    def build_relay_external_boc_batch(
+        self,
+        network: str,
+        relay_requests: list[TvmRelayRequest],
+    ) -> bytes:
+        self.batch_built.append((network, relay_requests))
+        if any(relay_request.state_init is not None for relay_request in relay_requests):
+            raise RuntimeError("state_init is not supported")
+        return b"external-boc-batch"
 
     def emulate_external_message(self, network: str, external_boc: bytes):
         _ = network, external_boc
@@ -99,7 +117,7 @@ class FakeSigner:
 
 def test_verify_accepts_valid_payment() -> None:
     signer = FakeSigner()
-    scheme = ExactTvmScheme(signer)
+    scheme = ExactTvmScheme(signer, batch_max_size=1)
 
     payload = _payment_payload(_settlement_boc(TEST_SECRET_KEY))
     requirements = _requirements()
@@ -112,7 +130,7 @@ def test_verify_accepts_valid_payment() -> None:
 
 def test_verify_rejects_when_emulation_has_no_successful_recipient_wallet_transaction() -> None:
     signer = FakeSigner(merchant_wallet_tx_success=False)
-    scheme = ExactTvmScheme(signer)
+    scheme = ExactTvmScheme(signer, batch_max_size=1)
 
     payload = _payment_payload(_settlement_boc(TEST_SECRET_KEY))
     requirements = _requirements()
@@ -121,12 +139,12 @@ def test_verify_rejects_when_emulation_has_no_successful_recipient_wallet_transa
 
     assert result.is_valid is False
     assert result.invalid_reason == ERR_SIMULATION_FAILED
-    assert "recipient jetton wallet transaction failed" in (result.invalid_message or "")
+    assert "successful jetton transfer to the merchant" in (result.invalid_message or "")
 
 
 def test_verify_rejects_wrong_recipient() -> None:
     signer = FakeSigner()
-    scheme = ExactTvmScheme(signer)
+    scheme = ExactTvmScheme(signer, batch_max_size=1)
 
     payload = _payment_payload(_settlement_boc(TEST_SECRET_KEY, recipient="0:" + "66" * 32))
     requirements = _requirements()
@@ -137,22 +155,9 @@ def test_verify_rejects_wrong_recipient() -> None:
     assert result.invalid_reason == ERR_INVALID_RECIPIENT
 
 
-def test_verify_accepts_undeployed_wallet_with_state_init() -> None:
-    signer = FakeSigner(is_active=False)
-    scheme = ExactTvmScheme(signer)
-
-    payload = _payment_payload(_settlement_boc(TEST_SECRET_KEY, include_state_init=True))
-    requirements = _requirements()
-
-    result = scheme.verify(payload, requirements)
-
-    assert result.is_valid is False
-    assert result.invalid_reason == ERR_STATE_INIT_NOT_SUPPORTED
-
-
 def test_settle_rejects_duplicates() -> None:
     signer = FakeSigner()
-    scheme = ExactTvmScheme(signer)
+    scheme = ExactTvmScheme(signer, batch_max_size=1)
 
     payload = _payment_payload(_settlement_boc(TEST_SECRET_KEY))
     requirements = _requirements()
@@ -163,22 +168,88 @@ def test_settle_rejects_duplicates() -> None:
     assert first.success is True
     assert second.success is False
     assert second.error_reason == ERR_DUPLICATE_SETTLEMENT
-    assert signer.built == [(TVM_MAINNET, PAYER, None), (TVM_MAINNET, PAYER, None)]
-    assert signer.sent == [(TVM_MAINNET, b"external-boc")]
+    assert len(signer.built) == 2
+    assert [entry[0] for entry in signer.built] == [TVM_MAINNET, TVM_MAINNET]
+    assert [entry[2] for entry in signer.built] == [True, True]
+    assert all(entry[1].destination == PAYER for entry in signer.built)
+    assert signer.sent == [(TVM_MAINNET, b"external-boc-batch")]
 
 
-def test_settle_accepts_state_init_for_undeployed_wallet() -> None:
-    signer = FakeSigner(is_active=False)
-    scheme = ExactTvmScheme(signer)
-
-    payload = _payment_payload(_settlement_boc(TEST_SECRET_KEY, include_state_init=True))
+def test_settle_batches_requests_on_flush_interval() -> None:
+    signer = FakeSigner()
+    scheme = ExactTvmScheme(signer, batch_flush_interval_seconds=0.05, batch_max_size=255)
     requirements = _requirements()
+    payload = _payment_payload("ignored")
+    results: list = []
+    settlements = [
+        _parsed_settlement("hash-a", "0:" + "77" * 32),
+        _parsed_settlement("hash-b", "0:" + "88" * 32),
+    ]
+    settlement_iter = iter(settlements)
 
-    result = scheme.settle(payload, requirements)
+    def _verify(*args, **kwargs):
+        settlement = next(settlement_iter)
+        return (
+            VerifyResponse(is_valid=True, payer=settlement.payer),
+            TvmRelayRequest(destination=settlement.payer, body=settlement.body, state_init=settlement.state_init),
+        )
 
-    assert result.success is False
-    assert result.error_reason == ERR_STATE_INIT_NOT_SUPPORTED
-    assert signer.sent == []
+    with patch("x402.mechanisms.tvm.exact.facilitator.parse_exact_tvm_payload", side_effect=settlements):
+        with patch.object(scheme, "_verify", side_effect=_verify):
+            threads = [
+                threading.Thread(target=lambda: results.append(scheme.settle(payload, requirements))),
+                threading.Thread(target=lambda: results.append(scheme.settle(payload, requirements))),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=1)
+
+    assert len(results) == 2
+    assert all(result.success for result in results)
+    assert all(result.transaction == "external-hash" for result in results)
+    assert signer.sent == [(TVM_MAINNET, b"external-boc-batch")]
+    assert len(signer.batch_built) == 1
+    assert len(signer.batch_built[0][1]) == 2
+
+
+def test_settle_flushes_immediately_when_batch_is_full() -> None:
+    signer = FakeSigner()
+    scheme = ExactTvmScheme(signer, batch_flush_interval_seconds=60.0, batch_max_size=2)
+    requirements = _requirements()
+    payload = _payment_payload("ignored")
+    results: list = []
+    settlements = [
+        _parsed_settlement("hash-a", "0:" + "77" * 32),
+        _parsed_settlement("hash-b", "0:" + "88" * 32),
+    ]
+    settlement_iter = iter(settlements)
+
+    def _verify(*args, **kwargs):
+        settlement = next(settlement_iter)
+        return (
+            VerifyResponse(is_valid=True, payer=settlement.payer),
+            TvmRelayRequest(destination=settlement.payer, body=settlement.body, state_init=settlement.state_init),
+        )
+
+    with patch("x402.mechanisms.tvm.exact.facilitator.parse_exact_tvm_payload", side_effect=settlements):
+        with patch.object(scheme, "_verify", side_effect=_verify):
+            threads = [
+                threading.Thread(target=lambda: results.append(scheme.settle(payload, requirements))),
+                threading.Thread(target=lambda: results.append(scheme.settle(payload, requirements))),
+            ]
+            started = time.monotonic()
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=1)
+            elapsed = time.monotonic() - started
+
+    assert len(results) == 2
+    assert all(result.success for result in results)
+    assert signer.sent == [(TVM_MAINNET, b"external-boc-batch")]
+    assert len(signer.batch_built) == 1
+    assert elapsed < 1.0
 
 
 def _payment_payload(settlement_boc: str) -> PaymentPayload:
@@ -228,18 +299,12 @@ def _w5_body(secret_key: bytes, *, recipient: str) -> Cell:
     out_msg = Contract.create_internal_msg(
         src=None,
         dest=Address(SOURCE_JETTON_WALLET),
-        value=1,
+        value=DEFAULT_JETTON_WALLET_MESSAGE_AMOUNT,
         body=_jetton_transfer_body(recipient),
     ).serialize()
-
-    action = (
-        begin_cell()
-        .store_uint(0x0EC3C86D, 32)
-        .store_uint(3, 8)
-        .store_ref(out_msg)
-        .end_cell()
+    out_list = serialize_out_list(
+        [serialize_send_msg_action(out_msg, SEND_MODE_PAY_FEES_SEPARATELY)]
     )
-    out_list = begin_cell().store_ref(Cell.empty()).store_cell(action).end_cell()
 
     unsigned_body = (
         begin_cell()
@@ -258,6 +323,28 @@ def _w5_body(secret_key: bytes, *, recipient: str) -> Cell:
 
 def _wallet_state_init() -> StateInit:
     return build_w5r1_state_init(WALLET_PUBLIC_KEY, WALLET_ID)
+
+
+def _parsed_settlement(settlement_hash: str, payer: str) -> ParsedTvmSettlement:
+    return ParsedTvmSettlement(
+        payer=payer,
+        wallet_id=WALLET_ID,
+        valid_until=int(time.time()) + 120,
+        seqno=0,
+        settlement_hash=settlement_hash,
+        body=begin_cell().store_uint(1, 1).end_cell(),
+        signed_slice_hash=b"\x00" * 32,
+        signature=b"\x00" * 64,
+        state_init=None,
+        transfer=ParsedJettonTransfer(
+            source_wallet=SOURCE_JETTON_WALLET,
+            destination=RECIPIENT,
+            response_destination=payer,
+            jetton_amount=1_000_000,
+            forward_ton_amount=1,
+            forward_payload=Cell.empty(),
+        ),
+    )
 
 
 PAYER = Address((0, _wallet_state_init().serialize().hash)).to_str(is_user_friendly=False)
@@ -295,7 +382,7 @@ def _emulate_trace(*, merchant_wallet_tx_success: bool, include_merchant_wallet_
         "actions": [
             {
                 "type": "jetton_transfer",
-                "success": True,
+                "success": merchant_wallet_tx_success,
                 "details": {
                     "asset": JETTON_MASTER,
                     "sender": PAYER,

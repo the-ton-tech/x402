@@ -4,19 +4,21 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from nacl.bindings import crypto_sign_seed_keypair
 from pytoniq_core import HashMap, begin_cell
 from pytoniq_core.tlb.account import StateInit
 
-from x402.mechanisms.tvm.constants import TVM_MAINNET
+from x402.mechanisms.tvm.constants import DEFAULT_RELAY_AMOUNT, TVM_MAINNET
 from x402.mechanisms.tvm.signers import (
     FacilitatorHighloadV3Signer,
     HighloadV3Config,
     MAX_USABLE_QUERY_SEQNO,
     _seqno_to_query_id,
 )
-from x402.mechanisms.tvm.types import TvmAccountState
+from x402.mechanisms.tvm.types import TvmAccountState, TvmRelayRequest
 
 
 class FakeToncenterClient:
@@ -86,20 +88,29 @@ def _make_highload_state_init(
     return StateInit(code=wallet_context.state_init.code, data=data)
 
 
-def test_build_relay_external_boc_rejects_state_init() -> None:
+def test_build_relay_external_boc_builds_single_request() -> None:
     signer = _make_signer(FakeToncenterClient())
+    facilitator_address = signer.get_addresses()[0]
+    state_init = _make_highload_state_init(signer)
+    signer.get_account_state = lambda address, network: TvmAccountState(  # type: ignore[method-assign]
+        address=address,
+        balance=0,
+        is_active=True,
+        is_uninitialized=False,
+        state_init=state_init,
+        last_transaction_lt=10 if address == facilitator_address else 0,
+    )
 
-    try:
-        signer.build_relay_external_boc(
-            TVM_MAINNET,
-            "0:" + "11" * 32,
-            begin_cell().end_cell(),
-            object(),  # type: ignore[arg-type]
-        )
-    except RuntimeError as exc:
-        assert "state_init" in str(exc)
-    else:
-        raise AssertionError("Expected RuntimeError")
+    external_boc = signer.build_relay_external_boc(
+        TVM_MAINNET,
+        TvmRelayRequest(
+            destination="0:" + "11" * 32,
+            body=begin_cell().end_cell(),
+            state_init=None,
+        ),
+    )
+
+    assert isinstance(external_boc, bytes)
 
 
 def test_build_relay_external_boc_skips_processed_query_ids() -> None:
@@ -119,9 +130,11 @@ def test_build_relay_external_boc_skips_processed_query_ids() -> None:
 
     external_boc = signer.build_relay_external_boc(
         TVM_MAINNET,
-        "0:" + "22" * 32,
-        begin_cell().end_cell(),
-        None,
+        TvmRelayRequest(
+            destination="0:" + "22" * 32,
+            body=begin_cell().end_cell(),
+            state_init=None,
+        ),
     )
 
     assert isinstance(external_boc, bytes)
@@ -145,14 +158,81 @@ def test_send_external_message_returns_toncenter_message_hash() -> None:
 
     external_boc = signer.build_relay_external_boc(
         TVM_MAINNET,
-        "0:" + "22" * 32,
-        begin_cell().end_cell(),
-        None,
+        TvmRelayRequest(
+            destination="0:" + "22" * 32,
+            body=begin_cell().end_cell(),
+            state_init=None,
+        ),
     )
     tx_hash = signer.send_external_message(TVM_MAINNET, external_boc)
 
     assert tx_hash == "external-message-hash"
     assert len(client.sent_messages) == 1
+
+
+def test_build_relay_external_boc_batch_supports_255_messages() -> None:
+    client = FakeToncenterClient()
+    signer = _make_signer(client)
+    facilitator_address = signer.get_addresses()[0]
+    signer._query_ids[TVM_MAINNET] = 0  # type: ignore[attr-defined]
+    state_init = _make_highload_state_init(signer)
+    signer.get_account_state = lambda address, network: TvmAccountState(  # type: ignore[method-assign]
+        address=address,
+        balance=0,
+        is_active=True,
+        is_uninitialized=False,
+        state_init=state_init,
+        last_transaction_lt=10 if address == facilitator_address else 0,
+    )
+
+    external_boc = signer.build_relay_external_boc_batch(
+        TVM_MAINNET,
+        [
+            TvmRelayRequest(
+                destination=f"0:{(index + 1):064x}",
+                body=begin_cell().store_uint(index, 16).end_cell(),
+                state_init=None,
+            )
+            for index in range(255)
+        ],
+    )
+
+    assert isinstance(external_boc, bytes)
+    assert signer._query_ids[TVM_MAINNET] == 1  # type: ignore[attr-defined]
+
+
+def test_build_relay_external_boc_uses_fixed_relay_amount() -> None:
+    client = FakeToncenterClient()
+    signer = _make_signer(client)
+    facilitator_address = signer.get_addresses()[0]
+    state_init = _make_highload_state_init(signer)
+    signer.get_account_state = lambda address, network: TvmAccountState(  # type: ignore[method-assign]
+        address=address,
+        balance=0,
+        is_active=True,
+        is_uninitialized=False,
+        state_init=state_init,
+        last_transaction_lt=10 if address == facilitator_address else 0,
+    )
+
+    captured_values: list[int] = []
+
+    def fake_create_internal_msg(*, src, dest, bounce, value, state_init=None, body):
+        _ = src, dest, bounce, state_init, body
+        captured_values.append(value)
+        return SimpleNamespace(serialize=lambda: begin_cell().end_cell())
+
+    with patch("x402.mechanisms.tvm.signers.Contract.create_internal_msg", side_effect=fake_create_internal_msg):
+        signer.build_relay_external_boc(
+            TVM_MAINNET,
+            TvmRelayRequest(
+                destination="0:" + "22" * 32,
+                body=begin_cell().end_cell(),
+                state_init=None,
+            ),
+        )
+
+    assert DEFAULT_RELAY_AMOUNT in captured_values
 
 
 def test_seqno_to_query_id_enforces_upstream_bounds() -> None:

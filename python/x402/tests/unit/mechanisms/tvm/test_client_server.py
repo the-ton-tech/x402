@@ -9,7 +9,7 @@ from pytoniq_core.tlb.account import StateInit
 
 from x402.mechanisms.tvm import (
     TVM_MAINNET,
-    USDT_MAINNET_MASTER,
+    USDT_MAINNET_MINTER,
     build_w5r1_state_init,
     make_w5r1_wallet_id,
     parse_exact_tvm_payload,
@@ -75,14 +75,6 @@ class FakeToncenterClient:
         _ = asset, owner
         return SOURCE_JETTON_WALLET
 
-    def get_seqno_from_account_state(self, account: TvmAccountState) -> int:
-        if account.is_uninitialized:
-            return 0
-        assert account.state_init is not None
-        data = account.state_init.data.begin_parse()
-        data.load_uint(1)
-        return data.load_uint(32)
-
 
 def test_client_creates_settlement_boc_for_undeployed_wallet() -> None:
     signer = FakeClientSigner()
@@ -92,7 +84,7 @@ def test_client_creates_settlement_boc_for_undeployed_wallet() -> None:
     payload = scheme.create_payment_payload(_requirements())
     settlement = parse_exact_tvm_payload(payload["settlementBoc"])
 
-    assert payload["asset"] == USDT_MAINNET_MASTER
+    assert payload["asset"] == USDT_MAINNET_MINTER
     assert settlement.payer == signer.address
     assert settlement.wallet_id == signer.wallet_id
     assert settlement.transfer.source_wallet == SOURCE_JETTON_WALLET
@@ -137,9 +129,9 @@ def test_server_defaults_to_mainnet_usdt_and_sponsored_fees() -> None:
     enhanced = scheme.enhance_payment_requirements(requirements, supported_kind, [])
 
     assert parsed.amount == "1500000"
-    assert parsed.asset == USDT_MAINNET_MASTER
+    assert parsed.asset == USDT_MAINNET_MINTER
     assert parsed.extra == {"areFeesSponsored": True}
-    assert enhanced.asset == USDT_MAINNET_MASTER
+    assert enhanced.asset == USDT_MAINNET_MINTER
     assert enhanced.amount == "1500000"
     assert enhanced.extra == {"areFeesSponsored": True}
 
@@ -148,7 +140,7 @@ def _requirements() -> PaymentRequirements:
     return PaymentRequirements(
         scheme="exact",
         network=TVM_MAINNET,
-        asset=USDT_MAINNET_MASTER,
+        asset=USDT_MAINNET_MINTER,
         amount="1500000",
         pay_to=RECIPIENT,
         max_timeout_seconds=300,

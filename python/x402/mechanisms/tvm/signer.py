@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from .types import TvmAccountState, TvmJettonWalletData
+from .types import TvmAccountState, TvmJettonWalletData, TvmRelayRequest
 
 try:
     from pytoniq_core import Cell
@@ -29,11 +29,19 @@ class FacilitatorTvmSigner(Protocol):
     def build_relay_external_boc(
         self,
         network: str,
-        destination: str,
-        body: Cell,
-        state_init: StateInit | None,
+        relay_request: TvmRelayRequest,
+        *,
+        for_emulation: bool = False,
     ) -> bytes:
         """Build a Highload V3 external message for relaying the pre-signed W5 message."""
+        ...
+
+    def build_relay_external_boc_batch(
+        self,
+        network: str,
+        relay_requests: list[TvmRelayRequest],
+    ) -> bytes:
+        """Build one Highload V3 external message that relays multiple requests."""
         ...
 
     def emulate_external_message(self, network: str, external_boc: bytes) -> dict[str, object]:

@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import base64
 
-from ..constants import ERR_INVALID_SETTLEMENT_BOC, ERR_INVALID_W5_ACTIONS, ERR_INVALID_W5_MESSAGE, W5_INTERNAL_SIGNED_OPCODE
-from ..types import ParsedTvmSettlement
 from ..codecs.common import normalize_address
 from ..codecs.jetton import parse_jetton_transfer
 from ..codecs.w5 import parse_out_list
+from ..constants import (
+    DEFAULT_JETTON_WALLET_MESSAGE_AMOUNT,
+    ERR_INVALID_SETTLEMENT_BOC,
+    ERR_INVALID_W5_ACTIONS,
+    ERR_INVALID_W5_MESSAGE,
+    SEND_MODE_PAY_FEES_SEPARATELY,
+    W5_INTERNAL_SIGNED_OPCODE,
+)
+from ..types import ParsedTvmSettlement
 
 try:
     from pytoniq_core import Cell
@@ -54,6 +61,10 @@ def parse_exact_tvm_payload(settlement_boc: str) -> ParsedTvmSettlement:
 
     action = actions[0]
     if not action.out_msg.is_internal or action.out_msg.info.dest is None:
+        raise ValueError(ERR_INVALID_W5_ACTIONS)
+    
+    if (action.out_msg.info.value_coins != DEFAULT_JETTON_WALLET_MESSAGE_AMOUNT
+        or action.mode != SEND_MODE_PAY_FEES_SEPARATELY):
         raise ValueError(ERR_INVALID_W5_ACTIONS)
 
     transfer = parse_jetton_transfer(

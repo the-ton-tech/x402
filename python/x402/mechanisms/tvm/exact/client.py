@@ -10,10 +10,11 @@ from ....schemas import PaymentRequirements
 from ..codecs.common import normalize_address
 from ..codecs.w5 import get_w5_seqno, serialize_out_list, serialize_send_msg_action
 from ..constants import (
-    DEFAULT_JETTON_TRANSFER_AMOUNT,
+    DEFAULT_JETTON_WALLET_MESSAGE_AMOUNT,
     DEFAULT_TONCENTER_TIMEOUT_SECONDS,
     JETTON_TRANSFER_OPCODE,
     SCHEME_EXACT,
+    SEND_MODE_PAY_FEES_SEPARATELY,
     SUPPORTED_NETWORKS,
     W5_INTERNAL_SIGNED_OPCODE,
 )
@@ -62,7 +63,6 @@ class ExactTvmScheme:
         seqno = get_w5_seqno(account)
 
         signed_body = self._build_signed_body(
-            payer=payer,
             source_wallet=source_wallet,
             requirements=requirements,
             seqno=seqno,
@@ -94,21 +94,20 @@ class ExactTvmScheme:
     def _build_signed_body(
         self,
         *,
-        payer: str,
         source_wallet: str,
         requirements: PaymentRequirements,
         seqno: int,
     ) -> Cell:
         transfer_body = (
             begin_cell()
-            .store_uint(JETTON_TRANSFER_OPCODE, 32)
-            .store_uint(0, 64)
-            .store_coins(int(requirements.amount))
-            .store_address(Address(normalize_address(requirements.pay_to)))
-            .store_address(Address(payer))
-            .store_bit(0)
-            .store_coins(1)
-            .store_bit(0)
+                .store_uint(JETTON_TRANSFER_OPCODE, 32)
+                .store_uint(0, 64)
+                .store_coins(int(requirements.amount))
+                .store_address(Address(requirements.pay_to))
+                .store_address(Address(requirements.pay_to))  # response destination
+                .store_bit(0)
+                .store_coins(1)  # probably we should store 0 here
+                .store_bit(0)
             .end_cell()
         )
 
@@ -116,20 +115,19 @@ class ExactTvmScheme:
             src=None,
             dest=Address(source_wallet),
             bounce=True,
-            value=self._get_transfer_amount(requirements),
+            value=DEFAULT_JETTON_WALLET_MESSAGE_AMOUNT,
             body=transfer_body,
         ).serialize()
 
-        actions = serialize_out_list([serialize_send_msg_action(out_msg)])
+        actions = serialize_out_list([serialize_send_msg_action(out_msg, SEND_MODE_PAY_FEES_SEPARATELY)])
         unsigned_body = (
             begin_cell()
-            .store_uint(W5_INTERNAL_SIGNED_OPCODE, 32)
-            .store_uint(self._signer.wallet_id, 32)
-            .store_uint(int(time.time()) + requirements.max_timeout_seconds, 32)
-            .store_uint(seqno, 32)
-            .store_bit(1)
-            .store_ref(actions)
-            .store_bit(0)
+                .store_uint(W5_INTERNAL_SIGNED_OPCODE, 32)
+                .store_uint(self._signer.wallet_id, 32)
+                .store_uint(int(time.time()) + requirements.max_timeout_seconds - 5, 32)  # From spec: "validUntil` timestamp in the W5 body MUST NOT be expired and MUST NOT be more than `maxTimeoutSeconds` in the future"
+                .store_uint(seqno, 32)
+                .store_maybe_ref(actions)
+                .store_bit(0)  # extra actions
             .end_cell()
         )
         signature = self._signer.sign_message(unsigned_body.hash)
@@ -145,10 +143,3 @@ class ExactTvmScheme:
             body=body,
         )
         return base64.b64encode(message.serialize().to_boc()).decode("utf-8")
-
-    def _get_transfer_amount(self, requirements: PaymentRequirements) -> int:
-        extra = requirements.extra or {}
-        transfer_amount = extra.get("jettonTransferTonAmount")
-        if transfer_amount is None:
-            return DEFAULT_JETTON_TRANSFER_AMOUNT
-        return int(transfer_amount)

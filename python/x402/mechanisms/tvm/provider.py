@@ -14,7 +14,6 @@ from .constants import (
     TVM_TESTNET,
 )
 from .codecs.common import address_to_stack_item, normalize_address
-from .codecs.w5 import get_w5_seqno
 from .types import TvmAccountState, TvmJettonWalletData
 
 try:
@@ -99,7 +98,7 @@ class ToncenterV3Client:
             "/api/v3/message",
             json={"boc": base64.b64encode(boc).decode("utf-8")},
         )
-        return str(response.get("message_hash_norm") or response.get("message_hash") or "")
+        return str(response.get("message_hash_norm") or response.get("message_hash"))
 
     def emulate_trace(self, boc: bytes) -> dict[str, Any]:
         response = self._request(
@@ -140,20 +139,14 @@ class ToncenterV3Client:
     def _parse_stack_address(self, item: dict[str, object]) -> str:
         cell = self._parse_stack_cell(item)
         address = cell.begin_parse().load_address()
-        if address is None:
-            raise RuntimeError("Toncenter stack item does not contain an address")
         return normalize_address(address)
 
     def _parse_stack_cell(self, item: dict[str, object]) -> Cell:
         value = item.get("value")
-        if not isinstance(value, str):
-            raise RuntimeError("Toncenter stack item does not contain a cell value")
         return Cell.one_from_boc(base64.b64decode(value))
 
     def _parse_stack_num(self, item: dict[str, object]) -> int:
         value = item.get("value")
-        if not isinstance(value, str):
-            raise RuntimeError("Toncenter stack item does not contain a numeric value")
         return int(value, 0)
 
     def _request(self, method: str, path: str, **kwargs: object) -> dict[str, Any]:

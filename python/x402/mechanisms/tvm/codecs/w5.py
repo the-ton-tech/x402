@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pytoniq_core import TransactionError
 
-from ..constants import ERR_INVALID_W5_ACTIONS, ERR_INVALID_W5_MESSAGE, W5R1_CODE_HASH, W5R1_CODE_HEX
+from ..constants import ERR_INVALID_W5_ACTIONS, ERR_INVALID_W5_MESSAGE, SEND_MODE_IGNORE_ERRORS, SEND_MODE_PAY_FEES_SEPARATELY, W5R1_CODE_HASH, W5R1_CODE_HEX
 from ..types import TvmAccountState, W5InitData
 from .common import get_network_global_id, normalize_address
 
@@ -111,7 +111,7 @@ def parse_out_list(cell: Cell) -> list[OutAction]:
     return out_actions
 
 
-def serialize_send_msg_action(message: Cell, mode: int = 3) -> Cell:
+def serialize_send_msg_action(message: Cell, mode: int = SEND_MODE_IGNORE_ERRORS + SEND_MODE_PAY_FEES_SEPARATELY) -> Cell:
     """Serialize one action_send_msg item."""
     return begin_cell().store_uint(0x0EC3C86D, 32).store_uint(mode, 8).store_ref(message).end_cell()
 

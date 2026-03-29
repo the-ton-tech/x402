@@ -8,7 +8,13 @@ from dataclasses import dataclass
 from secrets import randbelow
 
 from .codecs.common import normalize_address
-from .codecs.highload_v3 import MAX_USABLE_QUERY_SEQNO, load_highload_query_state, query_id_is_processed, seqno_to_query_id, serialize_internal_transfer
+from .codecs.highload_v3 import (
+    MAX_USABLE_QUERY_SEQNO,
+    load_highload_query_state,
+    query_id_is_processed,
+    seqno_to_query_id,
+    serialize_internal_transfer,
+)
 from .codecs.w5 import (
     address_from_state_init,
     build_w5r1_state_init,
@@ -26,7 +32,7 @@ from .constants import (
     HIGHLOAD_V3_CODE_HEX,
 )
 from .provider import ToncenterV3Client
-from .types import TvmAccountState, TvmJettonWalletData
+from .types import TvmAccountState, TvmJettonWalletData, TvmRelayRequest
 
 try:
     from pytoniq.contract.contract import Contract
@@ -181,35 +187,42 @@ class FacilitatorHighloadV3Signer:
     def build_relay_external_boc(
         self,
         network: str,
-        destination: str,
-        body: Cell,
-        state_init: StateInit | None,
+        relay_request: TvmRelayRequest,
+        *,
+        for_emulation: bool = False,
     ) -> bytes:
         """Build a Highload V3 external message for relaying the pre-signed W5 request."""
-        if state_init is not None and not isinstance(state_init, StateInit):
-            raise RuntimeError("state_init must be a StateInit instance or None")
+        return self.build_relay_external_boc_batch(network, [relay_request], for_emulation=for_emulation)
+
+    def build_relay_external_boc_batch(
+        self,
+        network: str,
+        relay_requests: list[TvmRelayRequest],
+        *,
+        for_emulation: bool = False,
+    ) -> bytes:
+        """Build one Highload V3 external message for relaying multiple W5 requests."""
+        if not relay_requests:
+            raise ValueError("relay_requests must not be empty")
 
         wallet_context = self._wallets[network]
-        query_id = self._allocate_query_id(network)
+        query_id = self._select_query_id(network, for_emulation)
         created_at = int(time.time())
         external_state_init = None
+        forward_actions: list[Cell] = []
 
-        forward_message = Contract.create_internal_msg(
-            src=None,
-            dest=Address(destination),
-            bounce=True,
-            value=wallet_context.config.relay_amount,
-            state_init=state_init,
-            body=body,
-        )
-        actions = serialize_out_list([serialize_send_msg_action(forward_message.serialize(), mode=3)])
-        message_to_send = Contract.create_internal_msg(
-            src=None,
-            dest=Address(wallet_context.address),
-            bounce=True,
-            value=10 ** 9,
-            body=serialize_internal_transfer(actions, query_id),
-        ).serialize()
+        for relay_request in relay_requests:
+            forward_message = Contract.create_internal_msg(
+                src=None,
+                dest=Address(relay_request.destination),
+                bounce=True,
+                value=wallet_context.config.relay_amount,
+                state_init=relay_request.state_init,
+                body=relay_request.body,
+            )
+            forward_actions.append(serialize_send_msg_action(forward_message.serialize(), mode=3))
+
+        message_to_send = self._pack_actions_message(wallet_context, forward_actions, query_id)
 
         message_inner = (
             begin_cell()
@@ -253,7 +266,7 @@ class FacilitatorHighloadV3Signer:
     def get_jetton_wallet_data(self, address: str, network: str) -> TvmJettonWalletData:
         """Read TEP-74 jetton wallet data."""
         return self._client(network).get_jetton_wallet_data(address)
-        
+
     def _client(self, network: str) -> ToncenterV3Client:
         if network not in self._clients:
             config = self._configs[network]
@@ -265,8 +278,27 @@ class FacilitatorHighloadV3Signer:
             )
         return self._clients[network]
 
-    def _allocate_query_id(self, network: str) -> int:
-        """Получает HighloadV3 QueryID из монотонно возрастающего seqno"""
+    def _pack_actions_message(
+        self,
+        wallet_context: "_WalletContext",
+        actions: list[Cell],
+        query_id: int,
+    ) -> Cell:
+        batch_actions = list(actions)
+        if len(batch_actions) > 254:
+            nested_message = self._pack_actions_message(wallet_context, batch_actions[253:], query_id)
+            batch_actions = batch_actions[:253] + [serialize_send_msg_action(nested_message, mode=3)]
+
+        return Contract.create_internal_msg(
+            src=None,
+            dest=Address(wallet_context.address),
+            bounce=True,
+            value=10 ** 9,
+            body=serialize_internal_transfer(serialize_out_list(batch_actions), query_id),
+        ).serialize()
+
+    def _select_query_id(self, network: str, for_emulation: bool) -> int:
+        """Pick a free HighloadV3 QueryID from the local monotonic seqno cursor."""
         with self._lock:
             wallet_context = self._wallets[network]
             query_state = load_highload_query_state(
@@ -275,11 +307,14 @@ class FacilitatorHighloadV3Signer:
             )
             wallet_context.deployed = query_state is not None
             attempts = MAX_USABLE_QUERY_SEQNO + 1
+            next_seqno = self._query_ids[network]
             for _ in range(attempts):
-                seqno = self._query_ids[network]
-                self._query_ids[network] = (seqno + 1) % (MAX_USABLE_QUERY_SEQNO + 1)
+                seqno = next_seqno
+                next_seqno = (next_seqno + 1) % (MAX_USABLE_QUERY_SEQNO + 1)
                 query_id = seqno_to_query_id(seqno)
                 if query_state is None or not query_id_is_processed(query_state, query_id):
+                    if not for_emulation:
+                        self._query_ids[network] = next_seqno
                     return query_id
         raise RuntimeError("No free Highload V3 query_id available")
 
