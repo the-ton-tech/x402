@@ -48,7 +48,7 @@ def test_wait_for_trace_confirmation_fetches_full_trace_after_stream_signal(monk
             trace_calls.append(trace_external_hash_norm)
             return expected_trace
 
-    monkeypatch.setattr(signer, "_ensure_streaming_watcher", lambda network: None)
+    monkeypatch.setattr(signer, "_ensure_streaming_watcher", lambda network: True)
     monkeypatch.setattr(signer, "_streaming_client", lambda network: _FakeStreamingClient())
     monkeypatch.setattr(signer, "_client", lambda network: _FakeProviderClient())
 
@@ -58,6 +58,8 @@ def test_wait_for_trace_confirmation_fetches_full_trace_after_stream_signal(monk
         timeout_seconds=12.5,
     )
 
-    assert stream_calls == [("trace-hash-1", 12.5)]
+    assert len(stream_calls) == 1
+    assert stream_calls[0][0] == "trace-hash-1"
+    assert stream_calls[0][1] == pytest.approx(12.5, abs=0.1)
     assert trace_calls == ["trace-hash-1"]
     assert result == expected_trace

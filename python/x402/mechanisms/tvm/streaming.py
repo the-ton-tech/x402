@@ -174,6 +174,24 @@ class ToncenterStreamingSseClient:
         self._pending_trace_waiters: dict[str, list[queue.Queue[dict[str, Any] | Exception]]] = {}
         self._recent_trace_results: dict[str, _RecentTraceResult] = {}
 
+    def close(self) -> None:
+        """Close the watcher and any underlying stream resources."""
+        with self._lock:
+            watcher = self._watcher
+            self._watcher = None
+            self._watched_address = None
+            pending_waiters = self._pending_trace_waiters
+            self._pending_trace_waiters = {}
+            self._recent_trace_results = {}
+
+        self._stream_resources.close()
+        if watcher is not None:
+            watcher.close()
+
+        error = RuntimeError("Toncenter facilitator account stream closed")
+        for waiters in pending_waiters.values():
+            self._notify_waiters(waiters, error)
+
     def start_account_state_watcher(
         self,
         *,

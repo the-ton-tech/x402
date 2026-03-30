@@ -73,6 +73,10 @@ class ToncenterV3Client:
             state_init=state_init,
         )
 
+    def close(self) -> None:
+        """Close the underlying HTTP client."""
+        self._client.close()
+
     def get_jetton_wallet(self, asset: str, owner: str) -> str:
         result = self.run_get_method(asset, "get_wallet_address", [address_to_stack_item(owner)])
         return self._parse_stack_address(result[0])

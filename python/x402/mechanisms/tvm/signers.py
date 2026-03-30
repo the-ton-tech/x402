@@ -194,6 +194,27 @@ class FacilitatorHighloadV3Signer:
         """Get all facilitator wallet addresses."""
         return [wallet.address for wallet in self._wallets.values()]
 
+    def close(self) -> None:
+        """Close all Toncenter clients and streaming watchers owned by this signer."""
+        with self._lock:
+            streaming_clients = list(self._streaming_clients.values())
+            provider_clients = list(self._clients.values())
+            self._streaming_watchers = {}
+            self._streaming_clients = {}
+            self._clients = {}
+
+        for streaming_client in streaming_clients:
+            try:
+                streaming_client.close()
+            except Exception:
+                pass
+
+        for provider_client in provider_clients:
+            try:
+                provider_client.close()
+            except Exception:
+                pass
+
     def get_account_state(self, address: str, network: str) -> TvmAccountState:
         """Get current account state."""
         normalized_address = normalize_address(address)
@@ -293,18 +314,31 @@ class FacilitatorHighloadV3Signer:
         timeout_seconds: float,
     ) -> dict[str, object]:
         """Wait until the submitted trace reaches finalized."""
-        self._ensure_streaming_watcher(network)
-        self._streaming_client(network).wait_for_trace_confirmation(
-            trace_external_hash_norm=trace_external_hash_norm,
-            timeout_seconds=timeout_seconds,
-        )
-        for attempt in range(DEFAULT_TRACE_FETCH_ATTEMPTS):
+        deadline = time.monotonic() + timeout_seconds
+
+        if self._ensure_streaming_watcher(network):
             try:
-                return self._client(network).get_trace_by_message_hash(trace_external_hash_norm)
+                remaining = max(0.0, deadline - time.monotonic())
+                self._streaming_client(network).wait_for_trace_confirmation(
+                    trace_external_hash_norm=trace_external_hash_norm,
+                    timeout_seconds=remaining,
+                )
             except Exception as exc:
-                if attempt == DEFAULT_TRACE_FETCH_ATTEMPTS - 1:
-                    raise exc
-                time.sleep(DEFAULT_TRACE_FETCH_BACKOFF_SECONDS)
+                pass
+
+        last_error: Exception | None = None
+        while time.monotonic() < deadline:
+            try:
+                trace = self._client(network).get_trace_by_message_hash(trace_external_hash_norm)
+                if not trace.get("is_incomplete", False):
+                    return trace
+            except Exception as exc:
+                last_error = exc
+            time.sleep(DEFAULT_TRACE_FETCH_BACKOFF_SECONDS)
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"Timed out waiting for complete trace {trace_external_hash_norm}")
 
     def get_jetton_wallet_data(self, address: str, network: str) -> TvmJettonWalletData:
         """Read TEP-74 jetton wallet data."""
@@ -347,18 +381,22 @@ class FacilitatorHighloadV3Signer:
             self._facilitator_state_dirty[network] = False
         return refreshed_state
 
-    def _ensure_streaming_watcher(self, network: str) -> None:
+    def _ensure_streaming_watcher(self, network: str) -> bool:
         with self._lock:
             existing_watcher = self._streaming_watchers.get(network)
             if existing_watcher is not None and existing_watcher.is_alive():
-                return
+                return True
             if existing_watcher is not None:
                 self._streaming_watchers.pop(network, None)
-            watcher = self._streaming_client(network).start_account_state_watcher(
-                address=self._wallets[network].address,
-                on_invalidate=lambda: self._mark_facilitator_state_dirty(network),
-            )
+            try:
+                watcher = self._streaming_client(network).start_account_state_watcher(
+                    address=self._wallets[network].address,
+                    on_invalidate=lambda: self._mark_facilitator_state_dirty(network),
+                )
+            except Exception:
+                return False
             self._streaming_watchers[network] = watcher
+            return True
 
     def _mark_facilitator_state_dirty(self, network: str) -> None:
         with self._lock:

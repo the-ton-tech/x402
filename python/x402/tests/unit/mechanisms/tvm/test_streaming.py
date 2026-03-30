@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+import queue
 
 import pytest
 
@@ -193,3 +194,29 @@ def test_wait_for_trace_confirmation_fails_after_max_consecutive_stream_failures
         assert state["invalidations"] == 2
     finally:
         watcher.close()
+
+
+def test_close_stops_watcher_and_fails_pending_waiters():
+    client = ToncenterStreamingSseClient(base_url="https://toncenter.example")
+    waiter: queue.Queue[dict[str, object] | Exception] = queue.Queue(maxsize=1)
+    close_calls: list[str] = []
+
+    class _Watcher:
+        def close(self) -> None:
+            close_calls.append("closed")
+
+        def is_alive(self) -> bool:
+            return True
+
+    client._watcher = _Watcher()  # type: ignore[assignment]
+    client._watched_address = FACILITATOR_ADDRESS
+    client._pending_trace_waiters[TRACE_HASH] = [waiter]
+
+    client.close()
+
+    result = waiter.get_nowait()
+    assert isinstance(result, RuntimeError)
+    assert str(result) == "Toncenter facilitator account stream closed"
+    assert close_calls == ["closed"]
+    assert client._watcher is None
+    assert client._watched_address is None
