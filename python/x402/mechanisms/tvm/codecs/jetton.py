@@ -48,4 +48,5 @@ def parse_jetton_transfer(jetton_wallet: str, body: Cell) -> ParsedJettonTransfe
         jetton_amount=amount,
         forward_ton_amount=forward_ton_amount,
         forward_payload=forward_payload,
+        body_hash=body.hash,
     )

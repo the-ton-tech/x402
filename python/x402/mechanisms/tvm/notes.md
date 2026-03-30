@@ -2,8 +2,5 @@
 2. Сделать вайтлист кодов w5 (v5 beta, w5 дефолтный)
 3. В is_duplicate просто словарь _settlement_cache в памяти, это не безопасно. Возможно стоит добавить redis или типа того
 4. Проверка responseDestination и forwardTonAmount
-5. mode 64 в сообщении с w5 на jetton wallet
-Проверил:
-  - facilitator.py
-  - codecs: w5, highload_v3, jetton, common
-6. Было опытным путем в testnet выяснено, что максимум за один экстернал можно отправить 217 транз без state init, 185 со state init
+5. Было опытным путем в testnet выяснено, что максимум за один экстернал можно отправить 217 транз без state init, 185 со state init
+6. Надо выяснить что мы делаем со storage fees

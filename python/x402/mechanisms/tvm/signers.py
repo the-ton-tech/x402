@@ -51,6 +51,10 @@ except ImportError as e:
     ) from e
 
 
+DEFAULT_TRACE_FETCH_ATTEMPTS = 3
+DEFAULT_TRACE_FETCH_BACKOFF_SECONDS = 0.5
+
+
 @dataclass
 class HighloadV3Config:
     """Configuration for one facilitator wallet on a TVM network."""
@@ -197,6 +201,10 @@ class FacilitatorHighloadV3Signer:
             return self._get_facilitator_account_state(network)
         return self._client(network).get_account_state(address)
 
+    def get_jetton_wallet(self, asset: str, owner: str, network: str) -> str:
+        """Resolve the canonical TEP-74 jetton wallet for an owner."""
+        return self._client(network).get_jetton_wallet(asset, owner)
+
     def build_relay_external_boc(
         self,
         network: str,
@@ -286,10 +294,17 @@ class FacilitatorHighloadV3Signer:
     ) -> dict[str, object]:
         """Wait until the submitted trace reaches finalized."""
         self._ensure_streaming_watcher(network)
-        return self._streaming_client(network).wait_for_trace_confirmation(
+        self._streaming_client(network).wait_for_trace_confirmation(
             trace_external_hash_norm=trace_external_hash_norm,
             timeout_seconds=timeout_seconds,
         )
+        for attempt in range(DEFAULT_TRACE_FETCH_ATTEMPTS):
+            try:
+                return self._client(network).get_trace_by_message_hash(trace_external_hash_norm)
+            except Exception as exc:
+                if attempt == DEFAULT_TRACE_FETCH_ATTEMPTS - 1:
+                    raise exc
+                time.sleep(DEFAULT_TRACE_FETCH_BACKOFF_SECONDS)
 
     def get_jetton_wallet_data(self, address: str, network: str) -> TvmJettonWalletData:
         """Read TEP-74 jetton wallet data."""

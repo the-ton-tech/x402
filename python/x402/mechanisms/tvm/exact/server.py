@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from decimal import Decimal
+import re
 
 from ....schemas import AssetAmount, Network, PaymentRequirements, Price, SupportedKind
 from ..codecs.common import normalize_address, parse_amount, parse_money_to_decimal
@@ -44,13 +46,23 @@ class ExactTvmScheme:
                 extra=price.extra,
             )
 
+        if isinstance(price, int):
+            exact_decimal_amount = Decimal(price)
+        elif isinstance(price, float):
+            exact_decimal_amount = Decimal(str(price))
+        else:
+            clean = price.strip()
+            clean = clean.lstrip("$")
+            clean = re.sub(r"\s*(USD|USDT|usd|usdt)\s*$", "", clean)
+            exact_decimal_amount = Decimal(clean.strip())
+
         decimal_amount = parse_money_to_decimal(price)
         for parser in self._money_parsers:
             result = parser(decimal_amount, str(network))
             if result is not None:
                 return result
 
-        return self._default_money_conversion(decimal_amount, str(network))
+        return self._default_money_conversion(exact_decimal_amount, str(network))
 
     def enhance_payment_requirements(
         self,
@@ -80,9 +92,9 @@ class ExactTvmScheme:
 
         return requirements
 
-    def _default_money_conversion(self, amount: float, network: str) -> AssetAmount:
+    def _default_money_conversion(self, amount: Decimal, network: str) -> AssetAmount:
         return AssetAmount(
-            amount=str(parse_amount(str(amount), DEFAULT_DECIMALS)),
+            amount=str(parse_amount(format(amount, "f"), DEFAULT_DECIMALS)),
             asset=self._get_default_asset(network),
             extra={"areFeesSponsored": True},
         )

@@ -25,6 +25,10 @@ class FacilitatorTvmSigner(Protocol):
         """Get account state for a wallet or jetton wallet."""
         ...
 
+    def get_jetton_wallet(self, asset: str, owner: str, network: str) -> str:
+        """Resolve the canonical TEP-74 jetton wallet for an owner."""
+        ...
+
     def build_relay_external_boc(
         self,
         network: str,

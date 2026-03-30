@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import queue
 import threading
 import time
@@ -68,10 +69,8 @@ class _BatchResult:
 @dataclass
 class _QueuedSettlement:
     network: str
-    payer: str
     settlement_hash: str
     settlement: ParsedTvmSettlement
-    requirements: PaymentRequirements
     relay_request: TvmRelayRequest
     completed: threading.Event = field(default_factory=threading.Event)
     result: _BatchResult | None = None
@@ -212,10 +211,9 @@ class _SettlementBatcher:
 
             for queued in pending.batch:
                 try:
-                    ExactTvmScheme._verify_trace_actions(
+                    ExactTvmScheme._verify_finalized_trace_settlement(
                         finalized_trace,
                         settlement=queued.settlement,
-                        requirements=queued.requirements,
                     )
                     queued.result = _BatchResult(
                         success=True,
@@ -340,10 +338,8 @@ class ExactTvmScheme:
             batch_result = self._batcher.enqueue(
                 _QueuedSettlement(
                     network=str(requirements.network),
-                    payer=settlement.payer,
                     settlement_hash=settlement.settlement_hash,
                     settlement=settlement,
-                    requirements=requirements,
                     relay_request=relay_request,
                 )
             )
@@ -446,6 +442,16 @@ class ExactTvmScheme:
         if not verify_w5_signature(init_data_parsed.public_key, settlement.signed_slice_hash, settlement.signature):
             return (VerifyResponse(is_valid=False, invalid_reason=ERR_INVALID_SIGNATURE, payer=payer), None)
 
+        canonical_source_wallet = normalize_address(
+            self._signer.get_jetton_wallet(
+                requirements.asset,
+                payer,
+                str(requirements.network),
+            )
+        )
+        if normalize_address(settlement.transfer.source_wallet) != canonical_source_wallet:
+            return (VerifyResponse(is_valid=False, invalid_reason=ERR_INVALID_JETTON_TRANSFER, payer=payer), None)
+
         jetton_wallet_data = self._signer.get_jetton_wallet_data(
             settlement.transfer.source_wallet,
             str(requirements.network),
@@ -469,7 +475,7 @@ class ExactTvmScheme:
                 for_emulation=True,
             )
             emulation = self._signer.emulate_external_message(requirements.network, external_boc)
-            self._verify_trace_actions(emulation, settlement=settlement, requirements=requirements)
+            self._verify_finalized_trace_settlement(emulation, settlement=settlement)
         except Exception as e:
             return (
                 VerifyResponse(
@@ -507,46 +513,87 @@ class ExactTvmScheme:
             del self._settlement_cache[key]
 
     @staticmethod
-    def _verify_trace_actions(
+    def _iter_trace_transactions(trace_data: dict[str, object]) -> list[dict[str, object]]:
+        transactions = trace_data.get("transactions")
+        if not isinstance(transactions, dict):
+            raise ValueError("Toncenter trace did not return transactions dict")
+        return [tx for tx in transactions.values() if isinstance(tx, dict)]
+
+    @staticmethod
+    def _transaction_succeeded(transaction: dict[str, object]) -> bool:
+        description = transaction.get("description")
+        if not isinstance(description, dict) or description.get("aborted") is True:
+            return False
+
+        compute_phase = description.get("compute_ph")
+        if not isinstance(compute_phase, dict) or compute_phase.get("skipped") is True or compute_phase.get("success") is not True:
+            return False
+
+        action_phase = description.get("action")
+        if action_phase is not None and (not isinstance(action_phase, dict) or action_phase.get("success") is not True):
+            return False
+
+        return True
+
+    @staticmethod
+    def _body_hash(raw_hash: bytes) -> str:
+        return base64.b64encode(raw_hash).decode("ascii")
+
+    @staticmethod
+    def _message_body_hash_matches(message: dict[str, object], expected_hash: bytes) -> bool:
+        message_content = message.get("message_content")
+        if not isinstance(message_content, dict):
+            return False
+        message_hash = message_content.get("hash")
+        return isinstance(message_hash, str) and message_hash == ExactTvmScheme._body_hash(expected_hash)
+
+    @staticmethod
+    def _verify_finalized_trace_settlement(
         trace_data: dict[str, object],
         *,
         settlement: ParsedTvmSettlement,
-        requirements: PaymentRequirements,
     ) -> None:
-        actions = trace_data.get("actions")
-        if not isinstance(actions, list):
-            raise ValueError("Toncenter trace did not return actions")
-
-        expected_asset = normalize_address(requirements.asset)
-        expected_receiver = normalize_address(requirements.pay_to)
-        expected_sender = settlement.payer
+        transactions = ExactTvmScheme._iter_trace_transactions(trace_data)
         expected_source_wallet = normalize_address(settlement.transfer.source_wallet)
-        expected_amount = int(requirements.amount)
 
-        for action in actions:
-            if not isinstance(action, dict):
+        payer_transaction = None
+        for transaction in transactions:
+            if normalize_address(str(transaction.get("account"))) != settlement.payer:
                 continue
-            if action.get("type") != "jetton_transfer" or action.get("success") is not True:
+            if not ExactTvmScheme._transaction_succeeded(transaction):
                 continue
-            details = action.get("details")
-            if not isinstance(details, dict):
+            in_msg: dict = transaction.get("in_msg")
+            if not ExactTvmScheme._message_body_hash_matches(in_msg, settlement.body.hash):
                 continue
-            try:
-                asset = normalize_address(str(details["asset"]))
-                receiver = normalize_address(str(details["receiver"]))
-                sender = normalize_address(str(details["sender"]))
-                sender_wallet = normalize_address(str(details["sender_jetton_wallet"]))
-                amount = int(str(details["amount"]))
-            except Exception:
-                continue
-            if (
-                asset != expected_asset
-                or receiver != expected_receiver
-                or sender != expected_sender
-                or sender_wallet != expected_source_wallet
-                or amount != expected_amount
-            ):
-                continue
-            return
+            payer_transaction = transaction
+            break
+        if payer_transaction is None:
+            raise ValueError("Trace does not contain the expected payer wallet transaction")
 
-        raise ValueError("Trace actions do not contain a successful jetton transfer to the merchant")
+        out_msgs: list[dict] = payer_transaction.get("out_msgs")
+        payer_out_hash = None
+        for out_msg in out_msgs:
+            if normalize_address(str(out_msg.get("destination"))) != expected_source_wallet:
+                continue
+            if not ExactTvmScheme._message_body_hash_matches(out_msg, settlement.transfer.body_hash):
+                continue
+            payer_out_hash = out_msg["hash"]
+            break
+        if payer_out_hash is None:
+            raise ValueError("Trace payer wallet transaction is missing out message hash")
+
+        # According to TEP-74, it is sufficient to check the success of the transaction on the payer's jetton wallet
+        source_wallet_transaction = None
+        for transaction in transactions:
+            if normalize_address(str(transaction.get("account"))) != expected_source_wallet:
+                continue
+            if not ExactTvmScheme._transaction_succeeded(transaction):
+                continue
+            in_msg: dict = transaction.get("in_msg")
+            if not in_msg:
+                continue
+            if in_msg.get("hash") == payer_out_hash:
+                source_wallet_transaction = transaction
+                break
+        if source_wallet_transaction is None:
+            raise ValueError("Trace does not contain the expected source jetton wallet transaction")

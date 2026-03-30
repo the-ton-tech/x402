@@ -14,3 +14,13 @@ def test_parse_price_preserves_atomic_units_without_float_rounding_loss():
     assert result.amount == "2010000"
     assert result.asset == USDT_MAINNET_MINTER
     assert result.extra == {"areFeesSponsored": True}
+
+
+def test_parse_price_preserves_large_decimal_amount_without_float_rounding_loss():
+    scheme = ExactTvmScheme()
+
+    result = scheme.parse_price("9007199254740.993", TVM_MAINNET)
+
+    assert result.amount == "9007199254740993000"
+    assert result.asset == USDT_MAINNET_MINTER
+    assert result.extra == {"areFeesSponsored": True}

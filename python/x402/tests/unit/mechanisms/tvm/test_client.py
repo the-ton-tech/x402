@@ -56,7 +56,6 @@ class _ClientStub:
             is_active=False,
             is_uninitialized=True,
             state_init=None,
-            last_transaction_lt=None,
         )
 
     def get_jetton_wallet(self, asset: str, owner: str) -> str:

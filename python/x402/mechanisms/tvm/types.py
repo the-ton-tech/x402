@@ -47,6 +47,7 @@ class ParsedJettonTransfer:
     jetton_amount: int
     forward_ton_amount: int
     forward_payload: Cell
+    body_hash: bytes | None = None
 
 
 @dataclass
@@ -74,7 +75,6 @@ class TvmAccountState:
     is_active: bool
     is_uninitialized: bool
     state_init: StateInit | None
-    last_transaction_lt: int | None
 
 
 @dataclass
@@ -85,7 +85,6 @@ class TvmJettonWalletData:
     balance: int
     owner: str
     jetton_minter: str
-    wallet_code: Cell
 
 
 @dataclass

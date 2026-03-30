@@ -22,6 +22,7 @@ except ImportError as e:
 
 DEFAULT_STREAMING_READ_TIMEOUT_SECONDS = 20.0
 DEFAULT_STREAMING_RECONNECT_BACKOFF_SECONDS = 1.0
+DEFAULT_STREAMING_MAX_CONSECUTIVE_FAILURES = 3
 DEFAULT_RECENT_TRACE_RESULT_TTL_SECONDS = 60.0
 DEFAULT_STREAMING_START_TIMEOUT_SECONDS = 5.0
 
@@ -29,7 +30,7 @@ DEFAULT_STREAMING_START_TIMEOUT_SECONDS = 5.0
 def _account_stream_subscription(normalized_address: str) -> dict[str, object]:
     return {
         "addresses": [normalized_address],
-        "types": ["account_state_change", "trace"],
+        "types": ["account_state_change", "transactions"],
         "min_finality": "finalized",
     }
 
@@ -273,27 +274,46 @@ class ToncenterStreamingSseClient:
         on_invalidate: Callable[[], None],
         startup_state: _StartupState,
     ) -> None:
-        while not stop_event.is_set():
-            try:
-                self._consume_stream(
-                    subscription=_account_stream_subscription(normalized_address),
-                    stop_event=stop_event,
-                    on_event=lambda event: self._handle_stream_event(
-                        event,
-                        normalized_address=normalized_address,
-                        on_invalidate=on_invalidate,
-                        on_subscribed=startup_state.mark_ready,
-                    ),
-                    resources=self._stream_resources,
-                )
-            except Exception as exc:
-                if not startup_state.ready_event.is_set():
-                    startup_state.fail(exc)
-                    break
-                if stop_event.is_set():
-                    break
-                on_invalidate()
-                stop_event.wait(DEFAULT_STREAMING_RECONNECT_BACKOFF_SECONDS)
+        consecutive_failures = 0
+
+        def on_subscribed() -> None:
+            nonlocal consecutive_failures
+            consecutive_failures = 0
+            startup_state.mark_ready()
+
+        try:
+            while not stop_event.is_set():
+                try:
+                    self._consume_stream(
+                        subscription=_account_stream_subscription(normalized_address),
+                        stop_event=stop_event,
+                        on_event=lambda event: self._handle_stream_event(
+                            event,
+                            normalized_address=normalized_address,
+                            on_invalidate=on_invalidate,
+                            on_subscribed=on_subscribed,
+                        ),
+                        resources=self._stream_resources,
+                    )
+                except Exception as exc:
+                    if not startup_state.ready_event.is_set():
+                        startup_state.fail(exc)
+                        break
+                    if stop_event.is_set():
+                        break
+
+                    on_invalidate()
+                    consecutive_failures += 1
+                    if consecutive_failures >= DEFAULT_STREAMING_MAX_CONSECUTIVE_FAILURES:
+                        self._fail_pending_waiters(exc)
+                        break
+
+                    stop_event.wait(DEFAULT_STREAMING_RECONNECT_BACKOFF_SECONDS)
+        finally:
+            with self._lock:
+                if self._watcher is not None and self._watcher._thread is threading.current_thread():
+                    self._watcher = None
+                    self._watched_address = None
 
     def _consume_stream(
         self,
@@ -428,21 +448,12 @@ class ToncenterStreamingSseClient:
         event: dict[str, Any],
     ) -> tuple[str, dict[str, Any] | None, Exception | None] | None:
         event_type = event.get("type")
-        if event_type not in {"trace", "trace_invalidated"}:
+        if event_type not in {"trace", "transactions"}:
             return None
 
         trace_external_hash_norm = event.get("trace_external_hash_norm")
         if not isinstance(trace_external_hash_norm, str):
             return None
-
-        if event_type == "trace_invalidated":
-            return (
-                trace_external_hash_norm,
-                None,
-                RuntimeError(
-                    f"Toncenter trace {trace_external_hash_norm} was invalidated before confirmation"
-                ),
-            )
         if event.get("finality") != "finalized":
             return None
         return trace_external_hash_norm, event, None

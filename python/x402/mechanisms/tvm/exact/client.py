@@ -120,11 +120,12 @@ class ExactTvmScheme:
         ).serialize()
 
         actions = serialize_out_list([serialize_send_msg_action(out_msg, SEND_MODE_PAY_FEES_SEPARATELY)])
+        timeout_seconds = requirements.max_timeout_seconds - 5 if requirements.max_timeout_seconds > 10 else requirements.max_timeout_seconds // 2
         unsigned_body = (
             begin_cell()
                 .store_uint(W5_INTERNAL_SIGNED_OPCODE, 32)
                 .store_uint(self._signer.wallet_id, 32)
-                .store_uint(int(time.time()) + requirements.max_timeout_seconds - 5, 32)  # From spec: "validUntil` timestamp in the W5 body MUST NOT be expired and MUST NOT be more than `maxTimeoutSeconds` in the future"
+                .store_uint(int(time.time()) + timeout_seconds, 32)  # From spec: "validUntil` timestamp in the W5 body MUST NOT be expired and MUST NOT be more than `maxTimeoutSeconds` in the future"
                 .store_uint(seqno, 32)
                 .store_maybe_ref(actions)
                 .store_bit(0)  # extra actions

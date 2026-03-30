@@ -65,14 +65,12 @@ class ToncenterV3Client:
                 data=Cell.one_from_boc(base64.b64decode(data_boc)),
             )
 
-        last_transaction_lt = account.get("last_transaction_lt")
         return TvmAccountState(
             address=normalize_address(account.get("address") or address),
             balance=int(account.get("balance") or 0),
             is_active=status == "active",
             is_uninitialized=status in {"uninit", "nonexist"},
             state_init=state_init,
-            last_transaction_lt=int(last_transaction_lt) if last_transaction_lt is not None else None,
         )
 
     def get_jetton_wallet(self, asset: str, owner: str) -> str:
@@ -81,7 +79,7 @@ class ToncenterV3Client:
 
     def get_jetton_wallet_data(self, address: str) -> TvmJettonWalletData:
         result = self.run_get_method(address, "get_wallet_data", [])
-        if len(result) < 4:
+        if len(result) < 3:
             raise RuntimeError("Toncenter get_wallet_data returned an incomplete stack")
 
         return TvmJettonWalletData(
@@ -89,7 +87,6 @@ class ToncenterV3Client:
             balance=self._parse_stack_num(result[0]),
             owner=self._parse_stack_address(result[1]),
             jetton_minter=self._parse_stack_address(result[2]),
-            wallet_code=self._parse_stack_cell(result[3]),
         )
 
     def send_message(self, boc: bytes) -> str:
@@ -113,28 +110,23 @@ class ToncenterV3Client:
             raise RuntimeError("Toncenter returned an invalid emulateTrace response")
         return response
 
-    def has_finalized_transaction_by_message_hash(self, message_hash: str) -> bool:
+    def get_trace_by_message_hash(self, message_hash: str) -> dict[str, Any]:
         response = self._request(
             "GET",
-            "/api/v3/transactionsByMessage",
+            "/api/v3/traces",
             params={
-                "msg_hash": message_hash,
+                "msg_hash": [message_hash],
                 "limit": 1,
-                "offset": 0,
-                "direction": "in",
+                "sort": "desc",
             },
         )
-        transactions = response.get("transactions")
-        if not isinstance(transactions, list):
-            raise RuntimeError("Toncenter returned an invalid transactionsByMessage response")
-
-        for transaction in transactions:
-            if not isinstance(transaction, dict):
-                continue
-            finality = transaction.get("finality")
-            if finality in {2, "finalized"}:
-                return True
-        return False
+        traces = response.get("traces")
+        if not isinstance(traces, list):
+            raise RuntimeError("Toncenter returned an invalid traces response")
+        for trace in traces:
+            if isinstance(trace, dict):
+                return trace
+        raise RuntimeError(f"Toncenter returned no trace for message hash {message_hash}")
 
     def run_get_method(
         self,

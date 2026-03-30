@@ -10,13 +10,21 @@ import pytest
 pytest.importorskip("pytoniq_core")
 
 import x402.mechanisms.tvm.streaming as streaming_module
-from x402.mechanisms.tvm.streaming import ToncenterStreamingSseClient
+from x402.mechanisms.tvm.streaming import ToncenterStreamingSseClient, _account_stream_subscription
 
 TRACE_HASH = "trace-hash-1"
 FACILITATOR_ADDRESS = "0:" + "1" * 64
 
 
-def test_wait_for_trace_confirmation_returns_finalized_trace_payload():
+def test_account_stream_subscription_uses_transactions_and_account_state_change():
+    assert _account_stream_subscription(FACILITATOR_ADDRESS) == {
+        "addresses": [FACILITATOR_ADDRESS],
+        "types": ["account_state_change", "transactions"],
+        "min_finality": "finalized",
+    }
+
+
+def test_wait_for_trace_confirmation_returns_finalized_trace_payload_from_transactions_event(monkeypatch):
     client = ToncenterStreamingSseClient(base_url="https://toncenter.example")
     client._watcher = object()  # type: ignore[assignment]
 
@@ -32,10 +40,10 @@ def test_wait_for_trace_confirmation_returns_finalized_trace_payload():
     waiter.start()
     client._handle_stream_event(
         {
-            "type": "trace",
+            "type": "transactions",
             "finality": "finalized",
             "trace_external_hash_norm": TRACE_HASH,
-            "actions": [],
+            "transactions": [],
         },
         normalized_address=FACILITATOR_ADDRESS,
         on_invalidate=lambda: None,
@@ -45,31 +53,11 @@ def test_wait_for_trace_confirmation_returns_finalized_trace_payload():
 
     assert waiter.is_alive() is False
     assert result_holder["trace"] == {
-        "type": "trace",
+        "type": "transactions",
         "finality": "finalized",
         "trace_external_hash_norm": TRACE_HASH,
-        "actions": [],
+        "transactions": [],
     }
-
-
-def test_wait_for_trace_confirmation_raises_for_invalidated_trace():
-    client = ToncenterStreamingSseClient(base_url="https://toncenter.example")
-    client._watcher = object()  # type: ignore[assignment]
-    client._handle_stream_event(
-        {
-            "type": "trace_invalidated",
-            "trace_external_hash_norm": TRACE_HASH,
-        },
-        normalized_address=FACILITATOR_ADDRESS,
-        on_invalidate=lambda: None,
-        on_subscribed=lambda: None,
-    )
-
-    with pytest.raises(RuntimeError, match="invalidated before confirmation"):
-        client.wait_for_trace_confirmation(
-            trace_external_hash_norm=TRACE_HASH,
-            timeout_seconds=0.1,
-        )
 
 
 def test_start_account_state_watcher_retries_after_failed_start(monkeypatch):
@@ -116,12 +104,13 @@ def test_wait_for_trace_confirmation_survives_stream_reconnect(monkeypatch):
             on_event({"status": "subscribed"})
             time.sleep(0.05)
             raise RuntimeError("disconnect")
+        on_event({"status": "subscribed"})
         on_event(
             {
-                "type": "trace",
+                "type": "transactions",
                 "finality": "finalized",
                 "trace_external_hash_norm": TRACE_HASH,
-                "actions": [],
+                "transactions": [],
             }
         )
         stop_event.set()
@@ -146,11 +135,61 @@ def test_wait_for_trace_confirmation_survives_stream_reconnect(monkeypatch):
 
         assert waiter.is_alive() is False
         assert result_holder["trace"] == {
-            "type": "trace",
+            "type": "transactions",
             "finality": "finalized",
             "trace_external_hash_norm": TRACE_HASH,
-            "actions": [],
+            "transactions": [],
         }
         assert state["calls"] >= 2
+    finally:
+        watcher.close()
+
+
+def test_wait_for_trace_confirmation_fails_after_max_consecutive_stream_failures(monkeypatch):
+    client = ToncenterStreamingSseClient(base_url="https://toncenter.example")
+    state = {"calls": 0, "invalidations": 0}
+    release_first_failure = threading.Event()
+    result_holder: dict[str, object] = {}
+
+    monkeypatch.setattr(streaming_module, "DEFAULT_STREAMING_RECONNECT_BACKOFF_SECONDS", 0.01)
+    monkeypatch.setattr(streaming_module, "DEFAULT_STREAMING_MAX_CONSECUTIVE_FAILURES", 2)
+
+    def fake_consume_stream(*, subscription, stop_event, on_event, resources=None):
+        _ = subscription, stop_event, resources
+        state["calls"] += 1
+        if state["calls"] == 1:
+            on_event({"status": "subscribed"})
+            release_first_failure.wait(timeout=1.0)
+            raise RuntimeError("disconnect-1")
+        raise RuntimeError("disconnect-2")
+
+    def wait_for_trace() -> None:
+        try:
+            client.wait_for_trace_confirmation(
+                trace_external_hash_norm=TRACE_HASH,
+                timeout_seconds=1.0,
+            )
+        except Exception as exc:  # pragma: no branch - test captures the first terminal result
+            result_holder["error"] = exc
+
+    monkeypatch.setattr(client, "_consume_stream", fake_consume_stream)
+    watcher = client.start_account_state_watcher(
+        address=FACILITATOR_ADDRESS,
+        on_invalidate=lambda: state.__setitem__("invalidations", state["invalidations"] + 1),
+    )
+    try:
+        waiter = threading.Thread(target=wait_for_trace)
+        waiter.start()
+        release_first_failure.set()
+        waiter.join(timeout=0.5)
+
+        assert waiter.is_alive() is False
+        error = result_holder["error"]
+        assert isinstance(error, RuntimeError)
+        assert str(error) == (
+            "Toncenter facilitator account stream failed before confirmation: disconnect-2"
+        )
+        assert state["calls"] == 2
+        assert state["invalidations"] == 2
     finally:
         watcher.close()
