@@ -25,7 +25,9 @@ def test_account_stream_subscription_uses_transactions_and_account_state_change(
     }
 
 
-def test_wait_for_trace_confirmation_returns_finalized_trace_payload_from_transactions_event(monkeypatch):
+def test_wait_for_trace_confirmation_returns_finalized_trace_payload_from_transactions_event(
+    monkeypatch,
+):
     client = ToncenterStreamingSseClient(base_url="https://toncenter.example")
     client._watcher = object()  # type: ignore[assignment]
 

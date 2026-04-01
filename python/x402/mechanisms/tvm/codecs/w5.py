@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from pytoniq_core import TransactionError
 
-from ..constants import ERR_INVALID_W5_ACTIONS, ERR_INVALID_W5_MESSAGE, SEND_MODE_IGNORE_ERRORS, SEND_MODE_PAY_FEES_SEPARATELY, W5R1_CODE_HASH, W5R1_CODE_HEX
+from ..constants import (
+    ERR_INVALID_W5_ACTIONS,
+    ERR_INVALID_W5_MESSAGE,
+    SEND_MODE_IGNORE_ERRORS,
+    SEND_MODE_PAY_FEES_SEPARATELY,
+    W5R1_CODE_HASH,
+    W5R1_CODE_HEX,
+)
 from ..types import TvmAccountState, W5InitData
 from .common import get_network_global_id, normalize_address
 
@@ -77,7 +84,11 @@ def parse_w5_init_data(state_init: StateInit) -> W5InitData:
 
 def parse_active_w5_account_state(account_state: TvmAccountState) -> W5InitData:
     """Decode W5 state from an active account state."""
-    if not account_state.is_active or account_state.state_init is None or account_state.state_init.code is None:
+    if (
+        not account_state.is_active
+        or account_state.state_init is None
+        or account_state.state_init.code is None
+    ):
         raise RuntimeError(f"Account {account_state.address} does not have active W5 state")
     if account_state.state_init.code.hash.hex() != W5R1_CODE_HASH:
         raise RuntimeError(f"Account {account_state.address} is not a W5R1 wallet")
@@ -111,7 +122,9 @@ def parse_out_list(cell: Cell) -> list[OutAction]:
     return out_actions
 
 
-def serialize_send_msg_action(message: Cell, mode: int = SEND_MODE_IGNORE_ERRORS + SEND_MODE_PAY_FEES_SEPARATELY) -> Cell:
+def serialize_send_msg_action(
+    message: Cell, mode: int = SEND_MODE_IGNORE_ERRORS + SEND_MODE_PAY_FEES_SEPARATELY
+) -> Cell:
     """Serialize one action_send_msg item."""
     return begin_cell().store_uint(0x0EC3C86D, 32).store_uint(mode, 8).store_ref(message).end_cell()
 

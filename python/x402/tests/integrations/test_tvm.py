@@ -18,8 +18,11 @@ import pytest
 
 pytest.importorskip("pytoniq_core")
 
+from pytoniq_core import Cell
+
 from x402 import x402ClientSync, x402FacilitatorSync, x402ResourceServerSync
 from x402.mechanisms.tvm import (
+    EMPTY_FORWARD_PAYLOAD_BOC,
     ERR_DUPLICATE_SETTLEMENT,
     ERR_INVALID_SEQNO,
     SCHEME_EXACT,
@@ -215,7 +218,9 @@ class TestTvmIntegrationV2:
                 f"Client jetton wallet {self.client_jetton_wallet} needs at least {MIN_CLIENT_USDT_BALANCE} USDT units"
             )
 
-    def test_server_should_successfully_verify_and_settle_tvm_payment_from_client(self) -> None:
+    def test_server_should_successfully_verify_and_settle_tvm_payment_from_client(
+        self,
+    ) -> None:
         """Test the complete TVM V2 payment flow with REAL blockchain transactions."""
         self._require_live_balances()
 
@@ -300,8 +305,9 @@ class TestTvmIntegrationV2:
         assert settlement.payer == self.client_address
         assert settlement.state_init is None
         assert settlement.transfer.destination == self.facilitator_address
-        assert settlement.transfer.response_destination == self.facilitator_address
+        assert settlement.transfer.response_destination is None
         assert settlement.transfer.jetton_amount == 5_000_000
+        assert settlement.transfer.forward_ton_amount == 0
         assert settlement.transfer.source_wallet == self.client_jetton_wallet
 
     def test_invalid_recipient_fails_verification(self) -> None:

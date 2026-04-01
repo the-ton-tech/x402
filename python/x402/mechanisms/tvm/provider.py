@@ -148,7 +148,9 @@ class ToncenterV3Client:
             },
         )
         if int(response.get("exit_code", 0)) != 0:
-            raise RuntimeError(f"Toncenter get-method {method} failed with exit code {response['exit_code']}")
+            raise RuntimeError(
+                f"Toncenter get-method {method} failed with exit code {response['exit_code']}"
+            )
 
         result = response.get("stack")
         if not isinstance(result, list):
@@ -182,7 +184,10 @@ class ToncenterV3Client:
                 return data
             except httpx.HTTPStatusError as exc:
                 last_error = exc
-                if exc.response.status_code not in {429, 500, 502, 503, 504} or attempt == attempts - 1:
+                if (
+                    exc.response.status_code not in {429, 500, 502, 503, 504}
+                    or attempt == attempts - 1
+                ):
                     raise
                 retry_after = exc.response.headers.get("Retry-After")
                 if retry_after:

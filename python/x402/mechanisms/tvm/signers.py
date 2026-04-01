@@ -328,7 +328,7 @@ class FacilitatorHighloadV3Signer:
                 src=None,
                 dest=Address(relay_request.destination),
                 bounce=True,
-                value=wallet_context.config.relay_amount,
+                value=(wallet_context.config.relay_amount + relay_request.forward_ton_amount),
                 state_init=relay_request.state_init,
                 body=relay_request.body,
             )

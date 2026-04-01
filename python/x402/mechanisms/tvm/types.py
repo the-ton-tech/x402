@@ -43,7 +43,7 @@ class ParsedJettonTransfer:
 
     source_wallet: str
     destination: str
-    response_destination: str
+    response_destination: str | None
     jetton_amount: int
     forward_ton_amount: int
     forward_payload: Cell
@@ -94,6 +94,7 @@ class TvmRelayRequest:
     destination: str
     body: Cell
     state_init: StateInit | None
+    forward_ton_amount: int = 0
 
 
 @dataclass

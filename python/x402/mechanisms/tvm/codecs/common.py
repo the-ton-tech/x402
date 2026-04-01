@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import re
 from decimal import Decimal
 
 try:
-    from pytoniq_core import Address, Builder
+    from pytoniq_core import Address, Builder, Cell
 except ImportError as e:
     raise ImportError(
         "TVM mechanism requires pytoniq packages. Install with: pip install x402[tvm]"
@@ -28,6 +29,26 @@ def address_to_stack_item(address: str) -> object:
         "type": "slice",
         "value": base64.b64encode(cell.to_boc()).decode("utf-8"),
     }
+
+
+def decode_base64_boc(value: object) -> Cell:
+    """Decode a base64-encoded BoC string into a ``Cell``."""
+    if not isinstance(value, str):
+        raise ValueError("Expected a base64-encoded BoC string")
+    try:
+        return Cell.one_from_boc(base64.b64decode(value, validate=True))
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError("Expected a base64-encoded BoC string") from exc
+
+
+def make_zero_bit_cell() -> Cell:
+    """Build the effective default forward payload: a zero-bit cell."""
+    return Builder().store_bit(0).end_cell()
+
+
+def encode_base64_boc(cell: Cell) -> str:
+    """Encode a single-cell BoC as base64 text."""
+    return base64.b64encode(cell.to_boc()).decode("utf-8")
 
 
 def get_network_global_id(network: str) -> int:

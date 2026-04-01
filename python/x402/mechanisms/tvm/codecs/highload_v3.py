@@ -37,7 +37,13 @@ def seqno_to_query_id(seqno: int) -> int:
 
 def serialize_internal_transfer(actions: Cell, query_id: int) -> Cell:
     """Serialize Highload V3 internal_transfer body that installs OutActions."""
-    return begin_cell().store_uint(0xAE42E5A4, 32).store_uint(query_id, 64).store_ref(actions).end_cell()
+    return (
+        begin_cell()
+        .store_uint(0xAE42E5A4, 32)
+        .store_uint(query_id, 64)
+        .store_ref(actions)
+        .end_cell()
+    )
 
 
 def load_highload_query_state(
@@ -79,8 +85,9 @@ def query_id_is_processed(query_state: HighloadQueryState, query_id: int) -> boo
     """Check whether a Highload V3 query id was already processed."""
     shift = query_id >> 10
     bit_number = query_id & 1023
-    return (_bitmap_contains(query_state.old_queries.get(shift), bit_number) or 
-            _bitmap_contains(query_state.queries.get(shift), bit_number))
+    return _bitmap_contains(query_state.old_queries.get(shift), bit_number) or _bitmap_contains(
+        query_state.queries.get(shift), bit_number
+    )
 
 
 def _bitmap_contains(bitmap: Cell | None, bit_number: int) -> bool:

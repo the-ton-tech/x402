@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+
 import pytest
 
 pytest.importorskip("pytoniq_core")
+
+from pytoniq_core import begin_cell
 
 from x402.mechanisms.tvm import (
     TVM_TESTNET,
@@ -19,6 +23,7 @@ from x402.schemas import PaymentRequirements
 MERCHANT = "0:" + "2" * 64
 ASSET = "0:" + "3" * 64
 SOURCE_WALLET = "0:" + "4" * 64
+EMPTY_FORWARD_PAYLOAD = begin_cell().store_bit(0).end_cell()
 
 
 class _SignerStub:
@@ -63,7 +68,34 @@ class _ClientStub:
         return SOURCE_WALLET
 
 
-def test_create_payment_payload_uses_zero_forward_ton_amount(monkeypatch):
+def test_create_payment_payload_uses_requirements_forward_settings(monkeypatch):
+    scheme = ExactTvmScheme(_SignerStub())
+    monkeypatch.setattr(scheme, "_get_client", lambda network: _ClientStub())
+    forward_payload = begin_cell().store_uint(0xABCD, 16).end_cell()
+
+    payload = scheme.create_payment_payload(
+        PaymentRequirements(
+            scheme="exact",
+            network=TVM_TESTNET,
+            asset=ASSET,
+            amount="100",
+            pay_to=MERCHANT,
+            max_timeout_seconds=300,
+            extra={
+                "areFeesSponsored": True,
+                "forwardTonAmount": "50000000",
+                "forwardPayload": base64.b64encode(forward_payload.to_boc()).decode("ascii"),
+            },
+        )
+    )
+    settlement = parse_exact_tvm_payload(payload["settlementBoc"])
+
+    assert settlement.transfer.response_destination is None
+    assert settlement.transfer.forward_ton_amount == 50_000_000
+    assert settlement.transfer.forward_payload.hash == forward_payload.hash
+
+
+def test_create_payment_payload_uses_empty_forward_payload_defaults(monkeypatch):
     scheme = ExactTvmScheme(_SignerStub())
     monkeypatch.setattr(scheme, "_get_client", lambda network: _ClientStub())
 
@@ -80,5 +112,6 @@ def test_create_payment_payload_uses_zero_forward_ton_amount(monkeypatch):
     )
     settlement = parse_exact_tvm_payload(payload["settlementBoc"])
 
-    assert settlement.transfer.response_destination == MERCHANT
-    assert settlement.transfer.forward_ton_amount == 1
+    assert settlement.transfer.response_destination is None
+    assert settlement.transfer.forward_ton_amount == 0
+    assert settlement.transfer.forward_payload.hash == EMPTY_FORWARD_PAYLOAD.hash

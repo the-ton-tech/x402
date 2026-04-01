@@ -95,7 +95,7 @@ class TestParsedTypes:
         transfer = ParsedJettonTransfer(
             source_wallet="0:" + "9" * 64,
             destination="0:" + "a" * 64,
-            response_destination="0:" + "b" * 64,
+            response_destination=None,
             jetton_amount=1000,
             forward_ton_amount=1,
             forward_payload=cell,

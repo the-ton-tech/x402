@@ -7,7 +7,13 @@ from decimal import Decimal
 import re
 
 from ....schemas import AssetAmount, Network, PaymentRequirements, Price, SupportedKind
-from ..codecs.common import normalize_address, parse_amount, parse_money_to_decimal
+from ..codecs.common import (
+    encode_base64_boc,
+    make_zero_bit_cell,
+    normalize_address,
+    parse_amount,
+    parse_money_to_decimal,
+)
 from ..constants import (
     DEFAULT_DECIMALS,
     SCHEME_EXACT,
@@ -103,7 +109,11 @@ class ExactTvmScheme:
         return AssetAmount(
             amount=str(parse_amount(format(amount, "f"), DEFAULT_DECIMALS)),
             asset=self._get_default_asset(network),
-            extra={"areFeesSponsored": True},
+            extra={
+                "areFeesSponsored": True,
+                "forwardPayload": encode_base64_boc(make_zero_bit_cell()),
+                "forwardTonAmount": "0",
+            },
         )
 
     def _get_default_asset(self, network: str) -> str:

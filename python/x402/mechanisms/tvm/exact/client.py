@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 from ....schemas import PaymentRequirements
-from ..codecs.common import normalize_address
+from ..codecs.common import decode_base64_boc, normalize_address
 from ..codecs.w5 import get_w5_seqno, serialize_out_list, serialize_send_msg_action
 from ..constants import (
     DEFAULT_JETTON_WALLET_MESSAGE_AMOUNT,
@@ -52,6 +52,8 @@ class ExactTvmScheme:
             raise ValueError(
                 f"Signer network {self._signer.network} does not match requirements network {network}"
             )
+        if requirements.extra.get("areFeesSponsored") is not True:
+            raise ValueError("Exact TVM scheme requires extra.areFeesSponsored to be true")
 
         client = self._get_client(network)
         payer = normalize_address(self._signer.address)
@@ -98,18 +100,25 @@ class ExactTvmScheme:
         requirements: PaymentRequirements,
         seqno: int,
     ) -> Cell:
+        forward_ton_amount = int(requirements.extra.get("forwardTonAmount", 0))
+        if forward_ton_amount < 0 or forward_ton_amount > 10**9:
+            raise ValueError("Forward ton amount should be in range of [0, 1e9]")
         transfer_body = (
             begin_cell()
-                .store_uint(JETTON_TRANSFER_OPCODE, 32)
-                .store_uint(0, 64)
-                .store_coins(int(requirements.amount))
-                .store_address(Address(requirements.pay_to))
-                .store_address(Address(requirements.pay_to))  # response destination
-                .store_bit(0)
-                .store_coins(1)  # probably we should store 0 here
-                .store_bit(0)
-            .end_cell()
+            .store_uint(JETTON_TRANSFER_OPCODE, 32)
+            .store_uint(0, 64)
+            .store_coins(int(requirements.amount))
+            .store_address(Address(requirements.pay_to))
+            .store_address(None)
+            .store_bit(0)
+            .store_coins(forward_ton_amount)
         )
+        encoded_forward_payload = requirements.extra.get("forwardPayload")
+        if encoded_forward_payload is None:
+            transfer_body = transfer_body.store_uint(0, 2)
+        else:
+            forward_payload = decode_base64_boc(encoded_forward_payload)
+            transfer_body = transfer_body.store_maybe_ref(forward_payload)
 
         out_msg = Contract.create_internal_msg(
             src=None,
@@ -119,20 +128,30 @@ class ExactTvmScheme:
             body=transfer_body,
         ).serialize()
 
-        actions = serialize_out_list([serialize_send_msg_action(out_msg, SEND_MODE_PAY_FEES_SEPARATELY)])
-        timeout_seconds = requirements.max_timeout_seconds - 5 if requirements.max_timeout_seconds > 10 else requirements.max_timeout_seconds // 2
+        actions = serialize_out_list(
+            [serialize_send_msg_action(out_msg, SEND_MODE_PAY_FEES_SEPARATELY)]
+        )
+        timeout_seconds = (
+            requirements.max_timeout_seconds - 5
+            if requirements.max_timeout_seconds > 10
+            else requirements.max_timeout_seconds // 2
+        )
         unsigned_body = (
             begin_cell()
-                .store_uint(W5_INTERNAL_SIGNED_OPCODE, 32)
-                .store_uint(self._signer.wallet_id, 32)
-                .store_uint(int(time.time()) + timeout_seconds, 32)  # From spec: "validUntil` timestamp in the W5 body MUST NOT be expired and MUST NOT be more than `maxTimeoutSeconds` in the future"
-                .store_uint(seqno, 32)
-                .store_maybe_ref(actions)
-                .store_bit(0)  # extra actions
+            .store_uint(W5_INTERNAL_SIGNED_OPCODE, 32)
+            .store_uint(self._signer.wallet_id, 32)
+            .store_uint(
+                int(time.time()) + timeout_seconds, 32
+            )  # From spec: "validUntil` timestamp in the W5 body MUST NOT be expired and MUST NOT be more than `maxTimeoutSeconds` in the future"
+            .store_uint(seqno, 32)
+            .store_maybe_ref(actions)
+            .store_bit(0)  # extra actions
             .end_cell()
         )
         signature = self._signer.sign_message(unsigned_body.hash)
-        return begin_cell().store_slice(unsigned_body.begin_parse()).store_bytes(signature).end_cell()
+        return (
+            begin_cell().store_slice(unsigned_body.begin_parse()).store_bytes(signature).end_cell()
+        )
 
     def _build_settlement_boc(self, payer: str, body: Cell, include_state_init: bool) -> str:
         message = Contract.create_internal_msg(

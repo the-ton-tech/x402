@@ -34,7 +34,7 @@ def parse_exact_tvm_payload(settlement_boc: str) -> ParsedTvmSettlement:
     except Exception as exc:
         raise ValueError(ERR_INVALID_SETTLEMENT_BOC) from exc
 
-    if not message.is_internal or message.info.dest is None:
+    if not message.is_internal or message.info.dest is None or message.info.bounce is not True:
         raise ValueError(ERR_INVALID_SETTLEMENT_BOC)
 
     payer = normalize_address(message.info.dest)
@@ -62,9 +62,11 @@ def parse_exact_tvm_payload(settlement_boc: str) -> ParsedTvmSettlement:
     action = actions[0]
     if not action.out_msg.is_internal or action.out_msg.info.dest is None:
         raise ValueError(ERR_INVALID_W5_ACTIONS)
-    
-    if (action.out_msg.info.value_coins != DEFAULT_JETTON_WALLET_MESSAGE_AMOUNT
-        or action.mode != SEND_MODE_PAY_FEES_SEPARATELY):
+
+    if (
+        action.out_msg.info.value_coins != DEFAULT_JETTON_WALLET_MESSAGE_AMOUNT
+        or action.mode != SEND_MODE_PAY_FEES_SEPARATELY
+    ):
         raise ValueError(ERR_INVALID_W5_ACTIONS)
 
     transfer = parse_jetton_transfer(

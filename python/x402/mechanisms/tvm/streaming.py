@@ -241,7 +241,9 @@ class ToncenterStreamingSseClient:
                 if self._watcher is watcher:
                     self._watcher = None
                     self._watched_address = None
-            raise RuntimeError("Toncenter facilitator account stream failed to start") from startup_state.error
+            raise RuntimeError(
+                "Toncenter facilitator account stream failed to start"
+            ) from startup_state.error
         return watcher
 
     def wait_for_trace_confirmation(
@@ -261,7 +263,9 @@ class ToncenterStreamingSseClient:
             recent_result = self._recent_trace_results.get(trace_external_hash_norm)
             if recent_result is None:
                 trace_waiter = queue.Queue(maxsize=1)
-                self._pending_trace_waiters.setdefault(trace_external_hash_norm, []).append(trace_waiter)
+                self._pending_trace_waiters.setdefault(trace_external_hash_norm, []).append(
+                    trace_waiter
+                )
 
         if recent_result is not None:
             if recent_result.error is not None:
@@ -329,7 +333,10 @@ class ToncenterStreamingSseClient:
                     stop_event.wait(DEFAULT_STREAMING_RECONNECT_BACKOFF_SECONDS)
         finally:
             with self._lock:
-                if self._watcher is not None and self._watcher._thread is threading.current_thread():
+                if (
+                    self._watcher is not None
+                    and self._watcher._thread is threading.current_thread()
+                ):
                     self._watcher = None
                     self._watched_address = None
 
@@ -415,7 +422,9 @@ class ToncenterStreamingSseClient:
         self._notify_waiters(waiters, error if error is not None else payload)
 
     def _fail_pending_waiters(self, exc: Exception) -> None:
-        error = RuntimeError(f"Toncenter facilitator account stream failed before confirmation: {exc}")
+        error = RuntimeError(
+            f"Toncenter facilitator account stream failed before confirmation: {exc}"
+        )
         with self._lock:
             pending_trace_waiters = self._pending_trace_waiters
             self._pending_trace_waiters = {}
