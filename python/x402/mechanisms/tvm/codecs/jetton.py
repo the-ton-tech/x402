@@ -48,6 +48,7 @@ def parse_jetton_transfer(jetton_wallet: str, body: Cell) -> ParsedJettonTransfe
             normalize_address(response_destination) if response_destination else None
         ),
         jetton_amount=amount,
+        attached_ton_amount=0,
         forward_ton_amount=forward_ton_amount,
         forward_payload=forward_payload,
         body_hash=body.hash,

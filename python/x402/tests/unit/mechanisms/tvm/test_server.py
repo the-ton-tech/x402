@@ -13,6 +13,7 @@ from x402.mechanisms.tvm.constants import (
     USDT_TESTNET_MINTER,
 )
 from x402.mechanisms.tvm.exact.server import ExactTvmScheme
+from x402.schemas import PaymentRequirements, SupportedKind
 
 EMPTY_FORWARD_PAYLOAD_BOC = base64.b64encode(begin_cell().store_bit(0).end_cell().to_boc()).decode(
     "ascii"
@@ -59,3 +60,28 @@ def test_parse_price_uses_testnet_usdt_as_default_asset():
         "forwardPayload": EMPTY_FORWARD_PAYLOAD_BOC,
         "forwardTonAmount": "0",
     }
+
+
+def test_enhance_payment_requirements_normalizes_response_destination():
+    scheme = ExactTvmScheme()
+
+    requirements = PaymentRequirements(
+        scheme="exact",
+        network=TVM_TESTNET,
+        asset=USDT_TESTNET_MINTER,
+        amount="100",
+        pay_to=USDT_TESTNET_MINTER,
+        max_timeout_seconds=300,
+        extra={
+            "areFeesSponsored": True,
+            "responseDestination": "EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c",
+        },
+    )
+
+    result = scheme.enhance_payment_requirements(
+        requirements,
+        SupportedKind(x402_version=2, scheme="exact", network=TVM_TESTNET),
+        [],
+    )
+
+    assert result.extra["responseDestination"] == "0:" + "0" * 64

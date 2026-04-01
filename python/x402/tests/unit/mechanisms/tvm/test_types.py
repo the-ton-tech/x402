@@ -97,6 +97,7 @@ class TestParsedTypes:
             destination="0:" + "a" * 64,
             response_destination=None,
             jetton_amount=1000,
+            attached_ton_amount=2000,
             forward_ton_amount=1,
             forward_payload=cell,
             body_hash=b"hash",
@@ -115,5 +116,6 @@ class TestParsedTypes:
         )
 
         assert relay_request.body == cell
+        assert settlement.transfer.attached_ton_amount == 2000
         assert settlement.transfer.jetton_amount == 1000
         assert settlement.signature == b"sig"

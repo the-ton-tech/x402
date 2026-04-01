@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import queue
 import threading
 import time
@@ -30,6 +29,7 @@ from ..constants import (
     DEFAULT_SETTLEMENT_BATCH_FLUSH_SIZE,
     DEFAULT_SETTLEMENT_BATCH_MAX_SIZE,
     DEFAULT_STREAMING_CONFIRMATION_TIMEOUT_SECONDS,
+    DEFAULT_TVM_OUTER_GAS_BUFFER,
     ERR_DUPLICATE_SETTLEMENT,
     ERR_INSUFFICIENT_BALANCE,
     ERR_INVALID_AMOUNT,
@@ -54,17 +54,18 @@ from ..constants import (
     SUPPORTED_NETWORKS,
     W5R1_CODE_HASH,
 )
+from ..trace_utils import (
+    message_body_hash_matches,
+    parse_trace_transactions,
+    trace_transaction_compute_fees,
+    trace_transaction_fwd_fees,
+    trace_transaction_storage_fees,
+    transaction_succeeded,
+)
 from ..settlement_cache import SettlementCache
 from ..signer import FacilitatorTvmSigner
 from ..types import ExactTvmPayload, ParsedTvmSettlement, TvmRelayRequest, W5InitData
 from .codec import parse_exact_tvm_payload
-
-try:
-    from pytoniq_core import Cell
-except ImportError as e:
-    raise ImportError(
-        "TVM mechanism requires pytoniq packages. Install with: pip install x402[tvm]"
-    ) from e
 
 
 @dataclass
@@ -90,6 +91,24 @@ class _PendingConfirmation:
     network: str
     batch: list[_QueuedSettlement]
     trace_external_hash_norm: str
+
+
+def _effective_response_destination(extra: dict[str, Any]) -> str | None:
+    response_destination = extra.get("responseDestination")
+    if response_destination is None:
+        return None
+    return normalize_address(response_destination)
+
+
+def _effective_forward_ton_amount(extra: dict[str, Any]) -> int:
+    return int(extra.get("forwardTonAmount", 0))
+
+
+def _effective_forward_payload(extra: dict[str, Any]):
+    encoded_payload = extra.get("forwardPayload")
+    if encoded_payload is None:
+        return begin_cell().store_bit(0).end_cell()
+    return decode_base64_boc(encoded_payload)
 
 
 class _SettlementBatcher:
@@ -301,7 +320,8 @@ class ExactTvmScheme:
         try:
             tvm_payload = ExactTvmPayload.from_dict(payload.payload)
             settlement = parse_exact_tvm_payload(tvm_payload.settlement_boc)
-            return self._verify(payload, requirements, tvm_payload, settlement)[0]
+            verification, _ = self._verify(payload, requirements, tvm_payload, settlement)
+            return verification
         except ValueError as e:
             return VerifyResponse(is_valid=False, invalid_reason=str(e), payer="")
         except Exception as e:
@@ -431,6 +451,18 @@ class ExactTvmScheme:
         if normalize_address(tvm_payload.asset) != normalize_address(requirements.asset):
             return invalid_response(ERR_INVALID_ASSET)
 
+        expected_response_destination = _effective_response_destination(requirements.extra)
+        if _effective_response_destination(payload.accepted.extra) != expected_response_destination:
+            return invalid_response(ERR_INVALID_JETTON_TRANSFER)
+
+        expected_forward_ton_amount = _effective_forward_ton_amount(requirements.extra)
+        if _effective_forward_ton_amount(payload.accepted.extra) != expected_forward_ton_amount:
+            return invalid_response(ERR_INVALID_JETTON_TRANSFER)
+
+        expected_forward_payload = _effective_forward_payload(requirements.extra)
+        if _effective_forward_payload(payload.accepted.extra).hash != expected_forward_payload.hash:
+            return invalid_response(ERR_INVALID_JETTON_TRANSFER)
+
         # Up to this point, we've checked all fields in PaymentRequirements and PaymentPayload except for settlementBoc
 
         if settlement.transfer.destination != normalize_address(requirements.pay_to):
@@ -439,17 +471,9 @@ class ExactTvmScheme:
         if settlement.transfer.jetton_amount != int(requirements.amount):
             return invalid_response(ERR_INVALID_AMOUNT)
 
-        encoded_payload = requirements.extra.get("forwardPayload")
-        if encoded_payload is None:
-            expected_forward_payload = begin_cell().store_bit(0).end_cell()
-        else:
-            expected_forward_payload = decode_base64_boc(encoded_payload)
-
-        if settlement.transfer.forward_ton_amount != int(
-            requirements.extra.get("forwardTonAmount", 0)
-        ):
+        if settlement.transfer.forward_ton_amount != expected_forward_ton_amount:
             return invalid_response(ERR_INVALID_JETTON_TRANSFER)
-        if settlement.transfer.response_destination is not None:
+        if settlement.transfer.response_destination != expected_response_destination:
             return invalid_response(ERR_INVALID_JETTON_TRANSFER)
         if settlement.transfer.forward_payload.hash != expected_forward_payload.hash:
             return invalid_response(ERR_INVALID_JETTON_TRANSFER)
@@ -521,7 +545,7 @@ class ExactTvmScheme:
             return invalid_response(ERR_INSUFFICIENT_BALANCE)
 
         try:
-            relay_request = TvmRelayRequest(
+            provisional_relay_request = TvmRelayRequest(
                 destination=settlement.payer,
                 body=settlement.body,
                 state_init=settlement.state_init,
@@ -529,11 +553,30 @@ class ExactTvmScheme:
             )
             external_boc = self._signer.build_relay_external_boc(
                 requirements.network,
-                relay_request,
+                provisional_relay_request,
                 for_emulation=True,
             )
             emulation = self._signer.emulate_external_message(requirements.network, external_boc)
-            self._verify_finalized_trace_settlement(emulation, settlement=settlement)
+            payer_transaction = self._verify_finalized_trace_settlement(
+                emulation,
+                settlement=settlement,
+                return_transaction=True,
+            )
+            actual_inner = settlement.transfer.attached_ton_amount
+            required_outer = (
+                actual_inner
+                + trace_transaction_storage_fees(payer_transaction)
+                + trace_transaction_compute_fees(payer_transaction)
+                + trace_transaction_fwd_fees(payer_transaction)
+                + DEFAULT_TVM_OUTER_GAS_BUFFER
+            )
+            relay_request = TvmRelayRequest(
+                destination=settlement.payer,
+                body=settlement.body,
+                state_init=settlement.state_init,
+                forward_ton_amount=settlement.transfer.forward_ton_amount,
+                relay_amount=required_outer,
+            )
         except Exception as e:
             return (
                 VerifyResponse(
@@ -548,67 +591,23 @@ class ExactTvmScheme:
         return (VerifyResponse(is_valid=True, payer=payer), relay_request)
 
     @staticmethod
-    def _iter_trace_transactions(
-        trace_data: dict[str, object],
-    ) -> list[dict[str, object]]:
-        transactions = trace_data.get("transactions")
-        if not isinstance(transactions, dict):
-            raise ValueError("Toncenter trace did not return transactions dict")
-        return [tx for tx in transactions.values() if isinstance(tx, dict)]
-
-    @staticmethod
-    def _transaction_succeeded(transaction: dict[str, object]) -> bool:
-        description = transaction.get("description")
-        if not isinstance(description, dict) or description.get("aborted") is True:
-            return False
-
-        compute_phase = description.get("compute_ph")
-        if (
-            not isinstance(compute_phase, dict)
-            or compute_phase.get("skipped") is True
-            or compute_phase.get("success") is not True
-        ):
-            return False
-
-        action_phase = description.get("action")
-        if action_phase is not None and (
-            not isinstance(action_phase, dict) or action_phase.get("success") is not True
-        ):
-            return False
-
-        return True
-
-    @staticmethod
-    def _body_hash(raw_hash: bytes) -> str:
-        return base64.b64encode(raw_hash).decode("ascii")
-
-    @staticmethod
-    def _message_body_hash_matches(message: dict[str, object], expected_hash: bytes) -> bool:
-        message_content = message.get("message_content")
-        if not isinstance(message_content, dict):
-            return False
-        message_hash = message_content.get("hash")
-        return isinstance(message_hash, str) and message_hash == ExactTvmScheme._body_hash(
-            expected_hash
-        )
-
-    @staticmethod
     def _verify_finalized_trace_settlement(
         trace_data: dict[str, object],
         *,
         settlement: ParsedTvmSettlement,
-    ) -> str:
-        transactions = ExactTvmScheme._iter_trace_transactions(trace_data)
+        return_transaction: bool = False,
+    ) -> str | dict[str, object]:
+        transactions = parse_trace_transactions(trace_data)
         expected_source_wallet = normalize_address(settlement.transfer.source_wallet)
 
         payer_transaction = None
         for transaction in transactions:
             if normalize_address(str(transaction.get("account"))) != settlement.payer:
                 continue
-            if not ExactTvmScheme._transaction_succeeded(transaction):
+            if not transaction_succeeded(transaction):
                 continue
             in_msg: dict = transaction.get("in_msg")
-            if not ExactTvmScheme._message_body_hash_matches(in_msg, settlement.body.hash):
+            if not message_body_hash_matches(in_msg, settlement.body.hash):
                 continue
             payer_transaction = transaction
             break
@@ -620,9 +619,7 @@ class ExactTvmScheme:
         for out_msg in out_msgs:
             if normalize_address(str(out_msg.get("destination"))) != expected_source_wallet:
                 continue
-            if not ExactTvmScheme._message_body_hash_matches(
-                out_msg, settlement.transfer.body_hash
-            ):
+            if not message_body_hash_matches(out_msg, settlement.transfer.body_hash):
                 continue
             payer_out_hash = out_msg["hash"]
             break
@@ -634,7 +631,7 @@ class ExactTvmScheme:
         for transaction in transactions:
             if normalize_address(str(transaction.get("account"))) != expected_source_wallet:
                 continue
-            if not ExactTvmScheme._transaction_succeeded(transaction):
+            if not transaction_succeeded(transaction):
                 continue
             in_msg: dict = transaction.get("in_msg")
             if not in_msg:
@@ -648,4 +645,4 @@ class ExactTvmScheme:
         transaction_hash = payer_transaction.get("hash")
         if not isinstance(transaction_hash, str) or not transaction_hash:
             raise ValueError("Trace payer wallet transaction is missing transaction hash")
-        return transaction_hash
+        return payer_transaction if return_transaction else transaction_hash

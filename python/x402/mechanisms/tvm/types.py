@@ -45,6 +45,7 @@ class ParsedJettonTransfer:
     destination: str
     response_destination: str | None
     jetton_amount: int
+    attached_ton_amount: int
     forward_ton_amount: int
     forward_payload: Cell
     body_hash: bytes | None = None
@@ -95,6 +96,7 @@ class TvmRelayRequest:
     body: Cell
     state_init: StateInit | None
     forward_ton_amount: int = 0
+    relay_amount: int | None = None
 
 
 @dataclass

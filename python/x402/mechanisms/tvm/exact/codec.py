@@ -8,7 +8,6 @@ from ..codecs.common import normalize_address
 from ..codecs.jetton import parse_jetton_transfer
 from ..codecs.w5 import parse_out_list
 from ..constants import (
-    DEFAULT_JETTON_WALLET_MESSAGE_AMOUNT,
     ERR_INVALID_SETTLEMENT_BOC,
     ERR_INVALID_W5_ACTIONS,
     ERR_INVALID_W5_MESSAGE,
@@ -63,16 +62,14 @@ def parse_exact_tvm_payload(settlement_boc: str) -> ParsedTvmSettlement:
     if not action.out_msg.is_internal or action.out_msg.info.dest is None:
         raise ValueError(ERR_INVALID_W5_ACTIONS)
 
-    if (
-        action.out_msg.info.value_coins != DEFAULT_JETTON_WALLET_MESSAGE_AMOUNT
-        or action.mode != SEND_MODE_PAY_FEES_SEPARATELY
-    ):
+    if action.mode != SEND_MODE_PAY_FEES_SEPARATELY:
         raise ValueError(ERR_INVALID_W5_ACTIONS)
 
     transfer = parse_jetton_transfer(
         jetton_wallet=normalize_address(action.out_msg.info.dest),
         body=action.out_msg.body,
     )
+    transfer.attached_ton_amount = action.out_msg.info.value_coins
 
     signature = body_slice.load_bytes(64)
     if body_slice.remaining_bits or body_slice.remaining_refs:

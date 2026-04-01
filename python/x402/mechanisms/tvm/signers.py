@@ -32,8 +32,8 @@ from .constants import (
     DEFAULT_W5R1_SUBWALLET_NUMBER,
     HIGHLOAD_V3_CODE_HASH,
     HIGHLOAD_V3_CODE_HEX,
-    TONCENTER_TESTNET_BASE_URL,
     TONCENTER_MAINNET_BASE_URL,
+    TONCENTER_TESTNET_BASE_URL,
     TVM_MAINNET,
     TVM_TESTNET,
 )
@@ -324,11 +324,16 @@ class FacilitatorHighloadV3Signer:
         forward_actions: list[Cell] = []
 
         for relay_request in relay_requests:
+            forward_value = (
+                relay_request.relay_amount
+                if relay_request.relay_amount is not None
+                else wallet_context.config.relay_amount + relay_request.forward_ton_amount
+            )
             forward_message = Contract.create_internal_msg(
                 src=None,
                 dest=Address(relay_request.destination),
                 bounce=True,
-                value=(wallet_context.config.relay_amount + relay_request.forward_ton_amount),
+                value=forward_value,
                 state_init=relay_request.state_init,
                 body=relay_request.body,
             )

@@ -97,6 +97,13 @@ class ExactTvmScheme:
 
         if requirements.extra is None:
             requirements.extra = {}
+        if (
+            "responseDestination" in requirements.extra
+            and requirements.extra["responseDestination"] is not None
+        ):
+            requirements.extra["responseDestination"] = normalize_address(
+                requirements.extra["responseDestination"]
+            )
         if "areFeesSponsored" not in requirements.extra:
             requirements.extra["areFeesSponsored"] = (supported_kind.extra or {}).get(
                 "areFeesSponsored",
