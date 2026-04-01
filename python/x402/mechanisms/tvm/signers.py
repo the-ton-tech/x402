@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import threading
 import time
 from dataclasses import dataclass
@@ -30,8 +32,8 @@ from .constants import (
     DEFAULT_W5R1_SUBWALLET_NUMBER,
     HIGHLOAD_V3_CODE_HASH,
     HIGHLOAD_V3_CODE_HEX,
-    TONCENTER_MAINNET_BASE_URL,
     TONCENTER_TESTNET_BASE_URL,
+    TONCENTER_MAINNET_BASE_URL,
     TVM_MAINNET,
     TVM_TESTNET,
 )
@@ -40,6 +42,7 @@ from .streaming import ToncenterStreamingSseClient, ToncenterStreamingWatcher
 from .types import TvmAccountState, TvmJettonWalletData, TvmRelayRequest
 
 try:
+    from nacl.signing import SigningKey
     from pytoniq.contract.contract import Contract
     from pytoniq_core import Address, Cell, begin_cell
     from pytoniq_core.crypto.keys import mnemonic_to_wallet_key, private_key_to_public_key
@@ -53,6 +56,35 @@ except ImportError as e:
 
 DEFAULT_TRACE_FETCH_ATTEMPTS = 3
 DEFAULT_TRACE_FETCH_BACKOFF_SECONDS = 0.5
+
+
+def _normalize_private_key_bytes(private_key: bytes) -> bytes:
+    """Normalize a TVM private key to the 64-byte secret key format used by pytoniq."""
+    if len(private_key) == 64:
+        return private_key
+    if len(private_key) == 32:
+        return private_key + SigningKey(private_key).verify_key.encode()
+    raise ValueError("TVM private key must be 32 bytes (seed) or 64 bytes (secret key)")
+
+
+def _parse_private_key(private_key: str | bytes) -> bytes:
+    """Parse a TVM private key from raw bytes, hex, or base64 text."""
+    if isinstance(private_key, bytes):
+        return _normalize_private_key_bytes(private_key)
+
+    value = private_key.strip()
+    if value.startswith("0x"):
+        value = value[2:]
+
+    try:
+        return _normalize_private_key_bytes(bytes.fromhex(value))
+    except ValueError:
+        pass
+
+    try:
+        return _normalize_private_key_bytes(base64.b64decode(value, validate=True))
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError("TVM private key must be valid hex or base64") from exc
 
 
 @dataclass
@@ -90,6 +122,25 @@ class HighloadV3Config:
             workchain=workchain,
         )
 
+    @classmethod
+    def from_private_key(
+        cls,
+        private_key: str | bytes,
+        *,
+        subwallet_id: int = DEFAULT_HIGHLOAD_SUBWALLET_ID,
+        timeout: int = DEFAULT_HIGHLOAD_TIMEOUT,
+        relay_amount: int = DEFAULT_RELAY_AMOUNT,
+        workchain: int = 0,
+    ) -> HighloadV3Config:
+        """Create config from a TVM private key."""
+        return cls(
+            secret_key=_parse_private_key(private_key),
+            subwallet_id=subwallet_id,
+            timeout=timeout,
+            relay_amount=relay_amount,
+            workchain=workchain,
+        )
+
 
 @dataclass
 class WalletV5R1Config:
@@ -119,6 +170,23 @@ class WalletV5R1Config:
         return cls(
             network=network,
             secret_key=secret_key,
+            subwallet_number=subwallet_number,
+            workchain=workchain,
+        )
+
+    @classmethod
+    def from_private_key(
+        cls,
+        network: str,
+        private_key: str | bytes,
+        *,
+        subwallet_number: int = DEFAULT_W5R1_SUBWALLET_NUMBER,
+        workchain: int = 0,
+    ) -> WalletV5R1Config:
+        """Create config from a TVM private key."""
+        return cls(
+            network=network,
+            secret_key=_parse_private_key(private_key),
             subwallet_number=subwallet_number,
             workchain=workchain,
         )
@@ -234,7 +302,9 @@ class FacilitatorHighloadV3Signer:
         for_emulation: bool = False,
     ) -> bytes:
         """Build a Highload V3 external message for relaying the pre-signed W5 request."""
-        return self.build_relay_external_boc_batch(network, [relay_request], for_emulation=for_emulation)
+        return self.build_relay_external_boc_batch(
+            network, [relay_request], for_emulation=for_emulation
+        )
 
     def build_relay_external_boc_batch(
         self,
@@ -323,7 +393,7 @@ class FacilitatorHighloadV3Signer:
                     trace_external_hash_norm=trace_external_hash_norm,
                     timeout_seconds=remaining,
                 )
-            except Exception as exc:
+            except Exception:
                 pass
 
         last_error: Exception | None = None
@@ -345,24 +415,38 @@ class FacilitatorHighloadV3Signer:
         return self._client(network).get_jetton_wallet_data(address)
 
     def _client(self, network: str) -> ToncenterV3Client:
-        if network not in self._clients:
-            config = self._configs[network]
-            self._clients[network] = ToncenterV3Client(
-                network,
-                api_key=config.api_key,
-                base_url=config.toncenter_base_url,
-                timeout=config.toncenter_timeout_seconds,
-            )
-        return self._clients[network]
+        client = self._clients.get(network)
+        if client is not None:
+            return client
+
+        with self._lock:
+            client = self._clients.get(network)
+            if client is None:
+                config = self._configs[network]
+                client = ToncenterV3Client(
+                    network,
+                    api_key=config.api_key,
+                    base_url=config.toncenter_base_url,
+                    timeout=config.toncenter_timeout_seconds,
+                )
+                self._clients[network] = client
+            return client
 
     def _streaming_client(self, network: str) -> ToncenterStreamingSseClient:
-        if network not in self._streaming_clients:
-            config = self._configs[network]
-            self._streaming_clients[network] = ToncenterStreamingSseClient(
-                base_url=(config.toncenter_base_url or _default_streaming_base_url(network)),
-                api_key=config.api_key,
-            )
-        return self._streaming_clients[network]
+        client = self._streaming_clients.get(network)
+        if client is not None:
+            return client
+
+        with self._lock:
+            client = self._streaming_clients.get(network)
+            if client is None:
+                config = self._configs[network]
+                client = ToncenterStreamingSseClient(
+                    base_url=(config.toncenter_base_url or _default_streaming_base_url(network)),
+                    api_key=config.api_key,
+                )
+                self._streaming_clients[network] = client
+            return client
 
     def _get_facilitator_account_state(self, network: str) -> TvmAccountState:
         """We cache the account state of the facilitator. The cache is invalidated when an event arrives from the StreamingAPI."""
@@ -410,14 +494,18 @@ class FacilitatorHighloadV3Signer:
     ) -> Cell:
         batch_actions = list(actions)
         if len(batch_actions) > 254:
-            nested_message = self._pack_actions_message(wallet_context, batch_actions[253:], query_id)
-            batch_actions = batch_actions[:253] + [serialize_send_msg_action(nested_message, mode=3)]
+            nested_message = self._pack_actions_message(
+                wallet_context, batch_actions[253:], query_id
+            )
+            batch_actions = batch_actions[:253] + [
+                serialize_send_msg_action(nested_message, mode=3)
+            ]
 
         return Contract.create_internal_msg(
             src=None,
             dest=Address(wallet_context.address),
             bounce=True,
-            value=10 ** 9,
+            value=10**9,
             body=serialize_internal_transfer(serialize_out_list(batch_actions), query_id),
         ).serialize()
 

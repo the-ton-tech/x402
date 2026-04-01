@@ -8,7 +8,14 @@ import re
 
 from ....schemas import AssetAmount, Network, PaymentRequirements, Price, SupportedKind
 from ..codecs.common import normalize_address, parse_amount, parse_money_to_decimal
-from ..constants import DEFAULT_DECIMALS, SCHEME_EXACT, TVM_MAINNET, USDT_MAINNET_MINTER
+from ..constants import (
+    DEFAULT_DECIMALS,
+    SCHEME_EXACT,
+    TVM_MAINNET,
+    TVM_TESTNET,
+    USDT_MAINNET_MINTER,
+    USDT_TESTNET_MINTER,
+)
 
 MoneyParser = Callable[[float, str], AssetAmount | None]
 
@@ -102,6 +109,8 @@ class ExactTvmScheme:
     def _get_default_asset(self, network: str) -> str:
         if network == TVM_MAINNET:
             return USDT_MAINNET_MINTER
+        if network == TVM_TESTNET:
+            return USDT_TESTNET_MINTER
         raise ValueError(
             f"No default stablecoin configured for network {network}; specify an explicit asset"
         )
@@ -110,7 +119,10 @@ class ExactTvmScheme:
         extra = requirements.extra or {}
         if "decimals" in extra:
             return int(extra["decimals"])
-        if normalize_address(requirements.asset) == USDT_MAINNET_MINTER:
+        if normalize_address(requirements.asset) in {
+            USDT_MAINNET_MINTER,
+            USDT_TESTNET_MINTER,
+        }:
             return DEFAULT_DECIMALS
         raise ValueError(
             f"Token {requirements.asset} is not a registered asset for network "

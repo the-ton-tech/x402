@@ -3,10 +3,10 @@
 These tests perform REAL blockchain transactions on TON testnet using sync classes.
 
 Required environment variables:
-- WALLET_MNEMONIC: TON mnemonic used for both the payer W5 wallet and facilitator highload wallet
-- TONCENTER_API_KEY_TESTNET: Toncenter API key for TON testnet
+- TVM_PRIVATE_KEY: TON private key used for both the payer W5 wallet and facilitator highload wallet
+- TONCENTER_API_KEY: Toncenter API key for TON
 
-These must correspond to a testnet wallet that has TON and testnet USDT.
+These must correspond to a wallet that has TON and USDT.
 """
 
 from __future__ import annotations
@@ -47,9 +47,9 @@ from x402.schemas import (
     VerifyResponse,
 )
 
-WALLET_MNEMONIC = os.environ.get("WALLET_MNEMONIC")
-TONCENTER_API_KEY_TESTNET = os.environ.get("TONCENTER_API_KEY_TESTNET")
-TESTNET_BASE_URL = os.environ.get("TONCENTER_TESTNET_BASE_URL")
+TVM_PRIVATE_KEY = os.environ.get("TVM_PRIVATE_KEY")
+TONCENTER_API_KEY = os.environ.get("TONCENTER_API_KEY")
+TONCENTER_BASE_URL = os.environ.get("TONCENTER_BASE_URL")
 
 TEST_PAYMENT_AMOUNT = "1000"  # 0.001 USDT with 6 decimals
 MIN_CLIENT_TON_BALANCE = 100_000_000
@@ -57,8 +57,8 @@ MIN_FACILITATOR_TON_BALANCE = 1_000_000_000
 MIN_CLIENT_USDT_BALANCE = int(TEST_PAYMENT_AMOUNT)
 
 pytestmark = pytest.mark.skipif(
-    not WALLET_MNEMONIC or not TONCENTER_API_KEY_TESTNET,
-    reason="WALLET_MNEMONIC and TONCENTER_API_KEY_TESTNET are required for TVM integration tests",
+    not TVM_PRIVATE_KEY or not TONCENTER_API_KEY,
+    reason="TVM_PRIVATE_KEY and TONCENTER_API_KEY are required for TVM integration tests",
 )
 
 
@@ -145,20 +145,20 @@ class TestTvmIntegrationV2:
     """Integration tests for TVM V2 payment flow with REAL blockchain transactions."""
 
     def setup_method(self) -> None:
-        client_config = WalletV5R1Config.from_mnemonic(TVM_TESTNET, WALLET_MNEMONIC)
-        client_config.api_key = TONCENTER_API_KEY_TESTNET
-        client_config.base_url = TESTNET_BASE_URL
+        client_config = WalletV5R1Config.from_private_key(TVM_TESTNET, TVM_PRIVATE_KEY)
+        client_config.api_key = TONCENTER_API_KEY
+        client_config.base_url = TONCENTER_BASE_URL
         self.client_signer = WalletV5R1MnemonicSigner(client_config)
 
-        facilitator_config = HighloadV3Config.from_mnemonic(WALLET_MNEMONIC)
-        facilitator_config.api_key = TONCENTER_API_KEY_TESTNET
-        facilitator_config.toncenter_base_url = TESTNET_BASE_URL
+        facilitator_config = HighloadV3Config.from_private_key(TVM_PRIVATE_KEY)
+        facilitator_config.api_key = TONCENTER_API_KEY
+        facilitator_config.toncenter_base_url = TONCENTER_BASE_URL
         self.facilitator_signer = FacilitatorHighloadV3Signer({TVM_TESTNET: facilitator_config})
 
         self.provider = ToncenterV3Client(
             TVM_TESTNET,
-            api_key=TONCENTER_API_KEY_TESTNET,
-            base_url=TESTNET_BASE_URL,
+            api_key=TONCENTER_API_KEY,
+            base_url=TONCENTER_BASE_URL,
         )
 
         self.client_address = self.client_signer.address
@@ -197,7 +197,9 @@ class TestTvmIntegrationV2:
     def _require_live_balances(self) -> None:
         client_state = self.provider.get_account_state(self.client_address)
         facilitator_state = self.provider.get_account_state(self.facilitator_address)
-        client_jetton_balance = self.provider.get_jetton_wallet_data(self.client_jetton_wallet).balance
+        client_jetton_balance = self.provider.get_jetton_wallet_data(
+            self.client_jetton_wallet
+        ).balance
 
         if client_state.balance < MIN_CLIENT_TON_BALANCE:
             pytest.skip(

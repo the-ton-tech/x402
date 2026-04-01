@@ -124,6 +124,7 @@ def _make_settlement(*, settlement_hash: str, source_wallet: str, amount: int) -
             response_destination=MERCHANT,
             jetton_amount=amount,
             forward_ton_amount=1,
+            forward_payload=FakeCell(b"forward-payload"),  # type: ignore[arg-type]
             body_hash=transfer_body_hash,
         ),
     )

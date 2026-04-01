@@ -169,9 +169,10 @@ class ToncenterV3Client:
         return int(value, 0)
 
     def _request(self, method: str, path: str, **kwargs: object) -> dict[str, Any]:
+        attempts = 5
         backoff_seconds = 0.25
         last_error: Exception | None = None
-        for attempt in range(3):
+        for attempt in range(attempts):
             try:
                 response = self._client.request(method, path, **kwargs)
                 response.raise_for_status()
@@ -181,11 +182,18 @@ class ToncenterV3Client:
                 return data
             except httpx.HTTPStatusError as exc:
                 last_error = exc
-                if exc.response.status_code not in {429, 500, 502, 503, 504} or attempt == 2:
+                if exc.response.status_code not in {429, 500, 502, 503, 504} or attempt == attempts - 1:
                     raise
+                retry_after = exc.response.headers.get("Retry-After")
+                if retry_after:
+                    try:
+                        time.sleep(float(retry_after))
+                        continue
+                    except ValueError:
+                        pass
             except httpx.RequestError as exc:
                 last_error = exc
-                if attempt == 2:
+                if attempt == attempts - 1:
                     raise
             time.sleep(backoff_seconds * (attempt + 1))
 

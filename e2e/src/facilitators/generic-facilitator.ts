@@ -55,6 +55,7 @@ export interface FacilitatorConfig {
   svmPrivateKey?: string;
   aptosPrivateKey?: string;
   stellarPrivateKey?: string;
+  tvmPrivateKey?: string;
   networks: NetworkSet;
 }
 
@@ -116,6 +117,7 @@ export class GenericFacilitatorProxy extends BaseProxy implements FacilitatorPro
       SVM_PRIVATE_KEY: config.svmPrivateKey || '',
       APTOS_PRIVATE_KEY: config.aptosPrivateKey || '',
       STELLAR_PRIVATE_KEY: config.stellarPrivateKey || '',
+      TVM_PRIVATE_KEY: config.tvmPrivateKey || '',
 
       // Network configs from NetworkSet
       EVM_NETWORK: config.networks.evm.caip2,
@@ -126,6 +128,8 @@ export class GenericFacilitatorProxy extends BaseProxy implements FacilitatorPro
       APTOS_RPC_URL: config.networks.aptos.rpcUrl,
       STELLAR_NETWORK: config.networks.stellar.caip2,
       STELLAR_RPC_URL: config.networks.stellar.rpcUrl,
+      TVM_NETWORK: config.networks.tvm.caip2,
+      TONCENTER_BASE_URL: process.env.TONCENTER_BASE_URL || config.networks.tvm.rpcUrl,
     };
 
     // Pass through any additional environment variables required by the facilitator

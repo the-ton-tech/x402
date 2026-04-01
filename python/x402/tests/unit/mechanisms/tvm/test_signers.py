@@ -2,20 +2,62 @@
 
 from __future__ import annotations
 
+import base64
+
 import pytest
 
 pytest.importorskip("pytoniq_core")
 
-from x402.mechanisms.tvm.constants import TVM_TESTNET
-from x402.mechanisms.tvm.signers import FacilitatorHighloadV3Signer, HighloadV3Config
-
 from pytoniq_core.crypto.keys import mnemonic_to_wallet_key
+
+from x402.mechanisms.tvm.constants import TVM_TESTNET
+from x402.mechanisms.tvm.signers import (
+    FacilitatorHighloadV3Signer,
+    HighloadV3Config,
+    WalletV5R1Config,
+)
+
+MNEMONIC = (
+    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+)
+
+
+@pytest.mark.parametrize(
+    ("private_key", "factory"),
+    [
+        pytest.param(
+            lambda secret_key, seed: secret_key.hex(),
+            lambda private_key: HighloadV3Config.from_private_key(private_key),
+            id="highload-hex-64",
+        ),
+        pytest.param(
+            lambda secret_key, seed: seed.hex(),
+            lambda private_key: HighloadV3Config.from_private_key(private_key),
+            id="highload-hex-32",
+        ),
+        pytest.param(
+            lambda secret_key, seed: base64.b64encode(secret_key).decode(),
+            lambda private_key: WalletV5R1Config.from_private_key(TVM_TESTNET, private_key),
+            id="wallet-base64-64",
+        ),
+        pytest.param(
+            lambda secret_key, seed: base64.b64encode(seed).decode(),
+            lambda private_key: WalletV5R1Config.from_private_key(TVM_TESTNET, private_key),
+            id="wallet-base64-32",
+        ),
+    ],
+)
+def test_private_key_factories_match_mnemonic_secret_key(private_key, factory):
+    _, secret_key = mnemonic_to_wallet_key(MNEMONIC.split())
+    seed = secret_key[:32]
+
+    config = factory(private_key(secret_key, seed))
+
+    assert config.secret_key == secret_key
 
 
 def test_wait_for_trace_confirmation_fetches_full_trace_after_stream_signal(monkeypatch):
-    _, secret_key = mnemonic_to_wallet_key(
-        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".split()
-    )
+    _, secret_key = mnemonic_to_wallet_key(MNEMONIC.split())
     signer = FacilitatorHighloadV3Signer(
         {
             TVM_TESTNET: HighloadV3Config(
@@ -35,7 +77,9 @@ def test_wait_for_trace_confirmation_fetches_full_trace_after_stream_signal(monk
     }
 
     class _FakeStreamingClient:
-        def wait_for_trace_confirmation(self, *, trace_external_hash_norm: str, timeout_seconds: float):
+        def wait_for_trace_confirmation(
+            self, *, trace_external_hash_norm: str, timeout_seconds: float
+        ):
             stream_calls.append((trace_external_hash_norm, timeout_seconds))
             return {
                 "type": "transactions",

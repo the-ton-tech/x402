@@ -375,19 +375,17 @@ async function runTest() {
   const serverSvmAddress = process.env.SERVER_SVM_ADDRESS;
   const serverAptosAddress = process.env.SERVER_APTOS_ADDRESS;
   const serverStellarAddress = process.env.SERVER_STELLAR_ADDRESS;
+  const serverTvmAddress = process.env.SERVER_TVM_ADDRESS;
   const clientEvmPrivateKey = process.env.CLIENT_EVM_PRIVATE_KEY;
   const clientSvmPrivateKey = process.env.CLIENT_SVM_PRIVATE_KEY;
   const clientAptosPrivateKey = process.env.CLIENT_APTOS_PRIVATE_KEY;
   const clientStellarPrivateKey = process.env.CLIENT_STELLAR_PRIVATE_KEY;
+  const clientTvmPrivateKey = process.env.CLIENT_TVM_PRIVATE_KEY;
   const facilitatorEvmPrivateKey = process.env.FACILITATOR_EVM_PRIVATE_KEY;
   const facilitatorSvmPrivateKey = process.env.FACILITATOR_SVM_PRIVATE_KEY;
   const facilitatorAptosPrivateKey = process.env.FACILITATOR_APTOS_PRIVATE_KEY;
   const facilitatorStellarPrivateKey = process.env.FACILITATOR_STELLAR_PRIVATE_KEY;
-  if (!serverEvmAddress || !serverSvmAddress || !clientEvmPrivateKey || !clientSvmPrivateKey || !facilitatorEvmPrivateKey || !facilitatorSvmPrivateKey) {
-    errorLog('❌ Missing required environment variables:');
-    errorLog(' SERVER_EVM_ADDRESS, SERVER_SVM_ADDRESS, CLIENT_EVM_PRIVATE_KEY, CLIENT_SVM_PRIVATE_KEY, FACILITATOR_EVM_PRIVATE_KEY, and FACILITATOR_SVM_PRIVATE_KEY must be set');
-    process.exit(1);
-  }
+  const facilitatorTvmPrivateKey = process.env.FACILITATOR_TVM_PRIVATE_KEY;
 
   // Discover all servers, clients, and facilitators (always include legacy)
   const discovery = new TestDiscovery('.', true); // Always discover legacy
@@ -460,6 +458,7 @@ async function runTest() {
   log(`   SVM: ${networks.svm.name} (${networks.svm.caip2})`);
   log(`   APTOS: ${networks.aptos.name} (${networks.aptos.caip2})`);
   log(`   STELLAR: ${networks.stellar.name} (${networks.stellar.caip2})`);
+  log(`   TVM: ${networks.tvm.name} (${networks.tvm.caip2})`);
 
   if (networkMode === 'mainnet') {
     log('\n⚠️  WARNING: Running on MAINNET - real funds will be used!');
@@ -473,6 +472,50 @@ async function runTest() {
     log('❌ No scenarios match the selections');
     log('💡 Try selecting more options or run without filters\n');
     return;
+  }
+
+  const requiredEnvByFamily: Record<string, Array<[string, string | undefined]>> = {
+    evm: [
+      ['SERVER_EVM_ADDRESS', serverEvmAddress],
+      ['CLIENT_EVM_PRIVATE_KEY', clientEvmPrivateKey],
+      ['FACILITATOR_EVM_PRIVATE_KEY', facilitatorEvmPrivateKey],
+    ],
+    svm: [
+      ['SERVER_SVM_ADDRESS', serverSvmAddress],
+      ['CLIENT_SVM_PRIVATE_KEY', clientSvmPrivateKey],
+      ['FACILITATOR_SVM_PRIVATE_KEY', facilitatorSvmPrivateKey],
+    ],
+    aptos: [
+      ['SERVER_APTOS_ADDRESS', serverAptosAddress],
+      ['CLIENT_APTOS_PRIVATE_KEY', clientAptosPrivateKey],
+      ['FACILITATOR_APTOS_PRIVATE_KEY', facilitatorAptosPrivateKey],
+    ],
+    stellar: [
+      ['SERVER_STELLAR_ADDRESS', serverStellarAddress],
+      ['CLIENT_STELLAR_PRIVATE_KEY', clientStellarPrivateKey],
+      ['FACILITATOR_STELLAR_PRIVATE_KEY', facilitatorStellarPrivateKey],
+    ],
+    tvm: [
+      ['SERVER_TVM_ADDRESS', serverTvmAddress],
+      ['CLIENT_TVM_PRIVATE_KEY', clientTvmPrivateKey],
+      ['FACILITATOR_TVM_PRIVATE_KEY', facilitatorTvmPrivateKey],
+    ],
+  };
+
+  const selectedProtocolFamilies = new Set(filteredScenarios.map(scenario => scenario.protocolFamily));
+  const missingRequiredEnv: string[] = [];
+  for (const family of selectedProtocolFamilies) {
+    for (const [name, value] of requiredEnvByFamily[family] || []) {
+      if (!value) {
+        missingRequiredEnv.push(name);
+      }
+    }
+  }
+
+  if (missingRequiredEnv.length > 0) {
+    errorLog('❌ Missing required environment variables for selected protocol families:');
+    missingRequiredEnv.forEach(name => errorLog(` ${name}`));
+    process.exit(1);
   }
 
   // Apply coverage-based minimization if --min flag is set
@@ -551,14 +594,17 @@ async function runTest() {
     'SVM_PRIVATE_KEY',
     'APTOS_PRIVATE_KEY',
     'STELLAR_PRIVATE_KEY',
+    'TVM_PRIVATE_KEY',
     'EVM_NETWORK',
     'SVM_NETWORK',
     'APTOS_NETWORK',
     'STELLAR_NETWORK',
+    'TVM_NETWORK',
     'EVM_RPC_URL',
     'SVM_RPC_URL',
     'APTOS_RPC_URL',
     'STELLAR_RPC_URL',
+    'TONCENTER_BASE_URL',
   ]);
 
   for (const [facilitatorName, facilitator] of uniqueFacilitators) {
@@ -701,6 +747,7 @@ async function runTest() {
         SVM_NETWORK: networks.svm.caip2,
         APTOS_NETWORK: networks.aptos.caip2,
         STELLAR_NETWORK: networks.stellar.caip2,
+        TVM_NETWORK: networks.tvm.caip2,
       },
       stdio: 'pipe',
     },
@@ -756,14 +803,17 @@ async function runTest() {
     const testName = `${scenario.client.name} → ${scenario.server.name} → ${scenario.endpoint.path}${facilitatorLabel}`;
 
     const clientConfig: ClientConfig = {
-      evmPrivateKey: clientEvmPrivateKey!,
-      svmPrivateKey: clientSvmPrivateKey!,
+      evmPrivateKey: clientEvmPrivateKey || '',
+      svmPrivateKey: clientSvmPrivateKey || '',
       aptosPrivateKey: clientAptosPrivateKey || '',
       stellarPrivateKey: clientStellarPrivateKey || '',
+      tvmPrivateKey: clientTvmPrivateKey || '',
       serverUrl: `http://localhost:${port}`,
       endpointPath: scenario.endpoint.path,
       evmNetwork: networks.evm.caip2,
       evmRpcUrl: networks.evm.rpcUrl,
+      tvmNetwork: networks.tvm.caip2,
+      tvmRpcUrl: networks.tvm.rpcUrl,
     };
 
     try {
@@ -845,10 +895,11 @@ async function runTest() {
 
     const serverConfig: ServerConfig = {
       port,
-      evmPayTo: serverEvmAddress!,
-      svmPayTo: serverSvmAddress!,
+      evmPayTo: serverEvmAddress || '',
+      svmPayTo: serverSvmAddress || '',
       aptosPayTo: facilitatorSupportsAptos ? (serverAptosAddress || '') : '',
       stellarPayTo: facilitatorSupportsStellar ? (serverStellarAddress || '') : '',
+      tvmPayTo: serverTvmAddress || '',
       networks,
       facilitatorUrl,
       mockFacilitatorUrl,

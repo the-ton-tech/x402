@@ -6,7 +6,7 @@
  */
 
 export type NetworkMode = 'testnet' | 'mainnet';
-export type ProtocolFamily = 'evm' | 'svm' | 'aptos' | 'stellar';
+export type ProtocolFamily = 'evm' | 'svm' | 'aptos' | 'stellar' | 'tvm';
 
 export type NetworkConfig = {
   name: string;
@@ -20,6 +20,7 @@ export type NetworkSet = {
   svm: NetworkConfig;
   aptos: NetworkConfig;
   stellar: NetworkConfig;
+  tvm: NetworkConfig;
 };
 
 /**
@@ -48,6 +49,11 @@ const NETWORK_SETS: Record<NetworkMode, NetworkSet> = {
       caip2: 'stellar:testnet',
       rpcUrl: process.env.STELLAR_TESTNET_RPC_URL || 'https://soroban-testnet.stellar.org',
     },
+    tvm: {
+      name: 'TON Testnet',
+      caip2: 'tvm:-3',
+      rpcUrl: process.env.TONCENTER_TESTNET_BASE_URL || 'https://testnet.toncenter.com',
+    },
   },
   mainnet: {
     evm: {
@@ -71,6 +77,11 @@ const NETWORK_SETS: Record<NetworkMode, NetworkSet> = {
       caip2: 'stellar:pubnet',
       rpcUrl: process.env.STELLAR_RPC_URL || 'https://mainnet.sorobanrpc.com',
     },
+    tvm: {
+      name: 'TON Mainnet',
+      caip2: 'tvm:-239',
+      rpcUrl: process.env.TONCENTER_MAINNET_BASE_URL || 'https://toncenter.com',
+    },
   },
 };
 
@@ -78,7 +89,7 @@ const NETWORK_SETS: Record<NetworkMode, NetworkSet> = {
  * Get the network set for a given mode
  * 
  * @param mode - 'testnet' or 'mainnet'
- * @returns NetworkSet containing EVM, SVM, and Aptos network configs
+ * @returns NetworkSet containing all protocol network configs
  */
 export function getNetworkSet(mode: NetworkMode): NetworkSet {
   return NETWORK_SETS[mode];
@@ -88,7 +99,7 @@ export function getNetworkSet(mode: NetworkMode): NetworkSet {
  * Get network config for a protocol family in a given mode
  * 
  * @param mode - 'testnet' or 'mainnet'
- * @param protocolFamily - 'evm', 'svm', 'aptos', or 'stellar'
+ * @param protocolFamily - 'evm', 'svm', 'aptos', 'stellar', or 'tvm'
  * @returns NetworkConfig for the specified protocol
  */
 export function getNetworkForProtocol(
@@ -106,6 +117,6 @@ export function getNetworkForProtocol(
  */
 export function getNetworkModeDescription(mode: NetworkMode): string {
   const set = NETWORK_SETS[mode];
-  const networks = [set.evm.name, set.svm.name, set.aptos.name, set.stellar.name];
+  const networks = [set.evm.name, set.svm.name, set.aptos.name, set.stellar.name, set.tvm.name];
   return networks.join(' + ');
 }

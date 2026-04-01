@@ -115,18 +115,24 @@ CLIENT_EVM_PRIVATE_KEY=0x...        # EVM private key for client payments
 CLIENT_SVM_PRIVATE_KEY=...          # Solana private key for client payments
 CLIENT_APTOS_PRIVATE_KEY=...        # Aptos private key for client payments (hex string)
 CLIENT_STELLAR_PRIVATE_KEY=...      # Stellar private key for client payments
+CLIENT_TVM_PRIVATE_KEY=...          # TVM private key for client payments
 
 # Server payment addresses
 SERVER_EVM_ADDRESS=0x...            # Where servers receive EVM payments
 SERVER_SVM_ADDRESS=...              # Where servers receive Solana payments
 SERVER_APTOS_ADDRESS=0x...          # Where servers receive Aptos payments
 SERVER_STELLAR_ADDRESS=...          # Where servers receive Stellar payments
+SERVER_TVM_ADDRESS=...              # Where servers receive TVM payments
 
 # Facilitator wallets (⚠️ TEST WALLETS ONLY — used to fund/drain client between tests)
 FACILITATOR_EVM_PRIVATE_KEY=0x...   # EVM private key for facilitator
 FACILITATOR_SVM_PRIVATE_KEY=...     # Solana private key for facilitator
 FACILITATOR_APTOS_PRIVATE_KEY=...   # Aptos private key for facilitator (hex string)
 FACILITATOR_STELLAR_PRIVATE_KEY=... # Stellar private key for facilitator
+FACILITATOR_TVM_PRIVATE_KEY=...     # TVM private key for facilitator
+
+# TVM support
+TONCENTER_API_KEY=...               # Recommended for TVM client/facilitator access
 ```
 
 ### Account Setup Instructions

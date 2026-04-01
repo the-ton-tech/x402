@@ -74,8 +74,9 @@ def register_exact_tvm_facilitator(
 ) -> FacilitatorT:
     """Register TVM exact payment schemes to x402Facilitator."""
     from .facilitator import ExactTvmScheme as ExactTvmFacilitatorScheme
+    from ..settlement_cache import SettlementCache
 
-    scheme = ExactTvmFacilitatorScheme(signer)
+    scheme = ExactTvmFacilitatorScheme(signer, SettlementCache())
 
     if isinstance(networks, str):
         networks = [networks]

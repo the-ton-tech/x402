@@ -6,7 +6,6 @@ import base64
 import queue
 import threading
 import time
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -53,6 +52,7 @@ from ..constants import (
     SUPPORTED_NETWORKS,
     W5R1_CODE_HASH,
 )
+from ..settlement_cache import SettlementCache
 from ..signer import FacilitatorTvmSigner
 from ..types import ExactTvmPayload, ParsedTvmSettlement, TvmRelayRequest, W5InitData
 from .codec import parse_exact_tvm_payload
@@ -87,18 +87,18 @@ class _SettlementBatcher:
     def __init__(
         self,
         signer: FacilitatorTvmSigner,
+        settlement_cache: SettlementCache,
         *,
         flush_interval_seconds: float,
         flush_batch_size: int,
         confirmation_timeout_seconds: float,
-        _delete_settlement_cache: Callable[[str], None],
     ) -> None:
         self._signer = signer
+        self._settlement_cache = settlement_cache
         self._flush_interval_seconds = flush_interval_seconds
         self._flush_batch_size = flush_batch_size
         self._max_batch_size = DEFAULT_SETTLEMENT_BATCH_MAX_SIZE
         self._confirmation_timeout_seconds = confirmation_timeout_seconds
-        self._delete_settlement_cache = _delete_settlement_cache
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
         self._confirmation_queue: queue.SimpleQueue[_PendingConfirmation] = queue.SimpleQueue()
@@ -169,7 +169,7 @@ class _SettlementBatcher:
             trace_external_hash_norm = self._signer.send_external_message(network, external_boc)
         except Exception as exc:
             for queued in batch:
-                self._delete_settlement_cache(queued.settlement_hash)
+                self._settlement_cache.release(queued.settlement_hash)
             for queued in batch:
                 queued.result = _BatchResult(
                     success=False,
@@ -199,7 +199,7 @@ class _SettlementBatcher:
                 )
             except Exception as exc:
                 for queued in pending.batch:
-                    self._delete_settlement_cache(queued.settlement_hash)
+                    self._settlement_cache.release(queued.settlement_hash)
                     queued.result = _BatchResult(
                         success=False,
                         transaction=pending.transaction,
@@ -220,7 +220,7 @@ class _SettlementBatcher:
                         transaction=pending.transaction,
                     )
                 except Exception as exc:
-                    self._delete_settlement_cache(queued.settlement_hash)
+                    self._settlement_cache.release(queued.settlement_hash)
                     queued.result = _BatchResult(
                         success=False,
                         transaction=pending.transaction,
@@ -239,20 +239,20 @@ class ExactTvmScheme:
     def __init__(
         self,
         signer: FacilitatorTvmSigner,
+        settlement_cache: SettlementCache | None = None,
         *,
         batch_flush_interval_seconds: float = DEFAULT_SETTLEMENT_BATCH_FLUSH_INTERVAL_SECONDS,
         batch_max_size: int = DEFAULT_SETTLEMENT_BATCH_FLUSH_SIZE,
         streaming_confirmation_timeout_seconds: float = DEFAULT_STREAMING_CONFIRMATION_TIMEOUT_SECONDS,
     ) -> None:
         self._signer = signer
-        self._settlement_cache: dict[str, float] = {}
-        self._lock = threading.Lock()
+        self._settlement_cache = settlement_cache or SettlementCache()
         self._batcher = _SettlementBatcher(
             signer,
+            self._settlement_cache,
             flush_interval_seconds=batch_flush_interval_seconds,
             flush_batch_size=batch_max_size,
             confirmation_timeout_seconds=streaming_confirmation_timeout_seconds,
-            _delete_settlement_cache=self._delete_settlement_cache,
         )
 
     def get_extra(self, network: Network) -> dict[str, Any] | None:
@@ -325,7 +325,7 @@ class ExactTvmScheme:
                 network=requirements.network,
             )
 
-        if self._reserve_settlement_cache(settlement, requirements):
+        if self._settlement_cache.reserve(settlement.settlement_hash, requirements.max_timeout_seconds):
             return SettleResponse(
                 success=False,
                 error_reason=ERR_DUPLICATE_SETTLEMENT,
@@ -344,7 +344,7 @@ class ExactTvmScheme:
                 )
             )
         except Exception as e:
-            self._delete_settlement_cache(settlement.settlement_hash)
+            self._settlement_cache.release(settlement.settlement_hash)
             batch_result = _BatchResult(
                 success=False,
                 error_reason=ERR_TRANSACTION_FAILED,
@@ -488,29 +488,6 @@ class ExactTvmScheme:
             )
 
         return (VerifyResponse(is_valid=True, payer=payer), relay_request)
-
-    def _reserve_settlement_cache(
-        self,
-        settlement: ParsedTvmSettlement,
-        requirements: PaymentRequirements,
-    ) -> bool:
-        with self._lock:
-            self._cleanup_expired_settlements(requirements)
-            if settlement.settlement_hash in self._settlement_cache:
-                return True
-
-            self._settlement_cache[settlement.settlement_hash] = time.monotonic()
-            return False
-
-    def _delete_settlement_cache(self, settlement_hash: str) -> None:
-        with self._lock:
-            self._settlement_cache.pop(settlement_hash, None)
-
-    def _cleanup_expired_settlements(self, requirements: PaymentRequirements) -> None:
-        cutoff = time.monotonic() - requirements.max_timeout_seconds
-        expired = [key for key, ts in self._settlement_cache.items() if ts < cutoff]
-        for key in expired:
-            del self._settlement_cache[key]
 
     @staticmethod
     def _iter_trace_transactions(trace_data: dict[str, object]) -> list[dict[str, object]]:

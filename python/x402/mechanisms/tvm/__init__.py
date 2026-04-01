@@ -18,9 +18,9 @@ from .constants import (
     DEFAULT_HIGHLOAD_TIMEOUT,
     DEFAULT_MAX_TIMEOUT_SECONDS,
     DEFAULT_RELAY_AMOUNT,
-    DEFAULT_STREAMING_CONFIRMATION_TIMEOUT_SECONDS,
     DEFAULT_SETTLEMENT_BATCH_FLUSH_INTERVAL_SECONDS,
     DEFAULT_SETTLEMENT_BATCH_FLUSH_SIZE,
+    DEFAULT_STREAMING_CONFIRMATION_TIMEOUT_SECONDS,
     DEFAULT_TONCENTER_TIMEOUT_SECONDS,
     DEFAULT_W5R1_SUBWALLET_NUMBER,
     ERR_DUPLICATE_SETTLEMENT,
@@ -34,6 +34,7 @@ from .constants import (
     ERR_INVALID_SEQNO,
     ERR_INVALID_SETTLEMENT_BOC,
     ERR_INVALID_SIGNATURE,
+    ERR_INVALID_UNTIL_EXPIRED,
     ERR_INVALID_W5_ACTIONS,
     ERR_INVALID_W5_MESSAGE,
     ERR_NETWORK_MISMATCH,
@@ -41,7 +42,6 @@ from .constants import (
     ERR_TRANSACTION_FAILED,
     ERR_UNSUPPORTED_NETWORK,
     ERR_UNSUPPORTED_SCHEME,
-    ERR_INVALID_UNTIL_EXPIRED,
     ERR_VALID_UNTIL_TOO_FAR,
     HIGHLOAD_V3_CODE_HASH,
     JETTON_TRANSFER_OPCODE,
@@ -59,6 +59,7 @@ from .constants import (
 )
 from .exact.codec import parse_exact_tvm_payload
 from .provider import ToncenterV3Client
+from .settlement_cache import SettlementCache
 from .signer import ClientTvmSigner, FacilitatorTvmSigner
 from .signers import (
     FacilitatorHighloadV3Signer,
@@ -66,7 +67,14 @@ from .signers import (
     WalletV5R1Config,
     WalletV5R1MnemonicSigner,
 )
-from .types import ExactTvmPayload, ParsedJettonTransfer, ParsedTvmSettlement, TvmAccountState, TvmRelayRequest
+from .types import (
+    ExactTvmPayload,
+    ParsedJettonTransfer,
+    ParsedTvmSettlement,
+    TvmAccountState,
+    TvmJettonWalletData,
+    TvmRelayRequest,
+)
 
 __all__ = [
     "SCHEME_EXACT",
@@ -119,10 +127,12 @@ __all__ = [
     "FacilitatorHighloadV3Signer",
     "HighloadV3Config",
     "ToncenterV3Client",
+    "SettlementCache",
     "ExactTvmPayload",
     "ParsedJettonTransfer",
     "ParsedTvmSettlement",
     "TvmAccountState",
+    "TvmJettonWalletData",
     "TvmRelayRequest",
     "address_from_state_init",
     "build_w5r1_state_init",

@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from x402.mechanisms.tvm.constants import TVM_MAINNET, USDT_MAINNET_MINTER
+from x402.mechanisms.tvm.constants import (
+    TVM_MAINNET,
+    TVM_TESTNET,
+    USDT_MAINNET_MINTER,
+    USDT_TESTNET_MINTER,
+)
 from x402.mechanisms.tvm.exact.server import ExactTvmScheme
 
 
@@ -23,4 +28,14 @@ def test_parse_price_preserves_large_decimal_amount_without_float_rounding_loss(
 
     assert result.amount == "9007199254740993000"
     assert result.asset == USDT_MAINNET_MINTER
+    assert result.extra == {"areFeesSponsored": True}
+
+
+def test_parse_price_uses_testnet_usdt_as_default_asset():
+    scheme = ExactTvmScheme()
+
+    result = scheme.parse_price("$0.001", TVM_TESTNET)
+
+    assert result.amount == "1000"
+    assert result.asset == USDT_TESTNET_MINTER
     assert result.extra == {"areFeesSponsored": True}
