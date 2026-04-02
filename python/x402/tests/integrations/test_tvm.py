@@ -3,26 +3,32 @@
 These tests perform REAL blockchain transactions on TON testnet using sync classes.
 
 Required environment variables:
-- TVM_PRIVATE_KEY: TON private key used for both the payer W5 wallet and facilitator highload wallet
+- TVM_CLIENT_PRIVATE_KEY: TON private key used for the payer W5 wallet
+- TVM_FACILITATOR_PRIVATE_KEY: TON private key used for the facilitator highload wallet
 - TONCENTER_API_KEY: Toncenter API key for TON
 
-These must correspond to a wallet that has TON and USDT.
+For backward compatibility, if the split variables are not set the tests fall back to
+`TVM_PRIVATE_KEY` for both roles.
+
+Optional environment variables:
+- TVM_SECOND_CLIENT_PRIVATE_KEY: second funded W5 client used by the live batch-settlement test
+
+These must correspond to funded testnet wallets with TON and USDT.
 """
 
 from __future__ import annotations
 
 import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 pytest.importorskip("pytoniq_core")
 
-from pytoniq_core import Cell
-
 from x402 import x402ClientSync, x402FacilitatorSync, x402ResourceServerSync
 from x402.mechanisms.tvm import (
-    EMPTY_FORWARD_PAYLOAD_BOC,
     ERR_DUPLICATE_SETTLEMENT,
     ERR_INVALID_SEQNO,
     SCHEME_EXACT,
@@ -44,6 +50,7 @@ from x402.mechanisms.tvm.exact import (
 from x402.schemas import (
     PaymentPayload,
     PaymentRequirements,
+    ResourceConfig,
     ResourceInfo,
     SettleResponse,
     SupportedResponse,
@@ -51,17 +58,22 @@ from x402.schemas import (
 )
 
 TVM_PRIVATE_KEY = os.environ.get("TVM_PRIVATE_KEY")
+TVM_CLIENT_PRIVATE_KEY = os.environ.get("TVM_CLIENT_PRIVATE_KEY", TVM_PRIVATE_KEY)
+TVM_SECOND_CLIENT_PRIVATE_KEY = os.environ.get("TVM_SECOND_CLIENT_PRIVATE_KEY")
+TVM_FACILITATOR_PRIVATE_KEY = os.environ.get("TVM_FACILITATOR_PRIVATE_KEY", TVM_PRIVATE_KEY)
 TONCENTER_API_KEY = os.environ.get("TONCENTER_API_KEY")
 TONCENTER_BASE_URL = os.environ.get("TONCENTER_BASE_URL")
 
 TEST_PAYMENT_AMOUNT = "1000"  # 0.001 USDT with 6 decimals
-MIN_CLIENT_TON_BALANCE = 100_000_000
 MIN_FACILITATOR_TON_BALANCE = 1_000_000_000
 MIN_CLIENT_USDT_BALANCE = int(TEST_PAYMENT_AMOUNT)
 
 pytestmark = pytest.mark.skipif(
-    not TVM_PRIVATE_KEY or not TONCENTER_API_KEY,
-    reason="TVM_PRIVATE_KEY and TONCENTER_API_KEY are required for TVM integration tests",
+    not TVM_CLIENT_PRIVATE_KEY or not TVM_FACILITATOR_PRIVATE_KEY or not TONCENTER_API_KEY,
+    reason=(
+        "TVM_CLIENT_PRIVATE_KEY (or TVM_PRIVATE_KEY), TVM_FACILITATOR_PRIVATE_KEY "
+        "(or TVM_PRIVATE_KEY), and TONCENTER_API_KEY are required for TVM integration tests"
+    ),
 )
 
 
@@ -148,12 +160,12 @@ class TestTvmIntegrationV2:
     """Integration tests for TVM V2 payment flow with REAL blockchain transactions."""
 
     def setup_method(self) -> None:
-        client_config = WalletV5R1Config.from_private_key(TVM_TESTNET, TVM_PRIVATE_KEY)
+        client_config = WalletV5R1Config.from_private_key(TVM_TESTNET, TVM_CLIENT_PRIVATE_KEY)
         client_config.api_key = TONCENTER_API_KEY
         client_config.base_url = TONCENTER_BASE_URL
         self.client_signer = WalletV5R1MnemonicSigner(client_config)
 
-        facilitator_config = HighloadV3Config.from_private_key(TVM_PRIVATE_KEY)
+        facilitator_config = HighloadV3Config.from_private_key(TVM_FACILITATOR_PRIVATE_KEY)
         facilitator_config.api_key = TONCENTER_API_KEY
         facilitator_config.toncenter_base_url = TONCENTER_BASE_URL
         self.facilitator_signer = FacilitatorHighloadV3Signer({TVM_TESTNET: facilitator_config})
@@ -184,7 +196,7 @@ class TestTvmIntegrationV2:
             ExactTvmFacilitatorScheme(
                 self.facilitator_signer,
                 batch_flush_interval_seconds=0.05,
-                batch_max_size=1,
+                batch_flush_size=1,
             ),
         )
 
@@ -198,16 +210,11 @@ class TestTvmIntegrationV2:
         self.provider.close()
 
     def _require_live_balances(self) -> None:
-        client_state = self.provider.get_account_state(self.client_address)
         facilitator_state = self.provider.get_account_state(self.facilitator_address)
         client_jetton_balance = self.provider.get_jetton_wallet_data(
             self.client_jetton_wallet
         ).balance
 
-        if client_state.balance < MIN_CLIENT_TON_BALANCE:
-            pytest.skip(
-                f"Client wallet {self.client_address} needs at least {MIN_CLIENT_TON_BALANCE} nanotons"
-            )
         if facilitator_state.balance < MIN_FACILITATOR_TON_BALANCE:
             pytest.skip(
                 "Facilitator wallet "
@@ -216,6 +223,14 @@ class TestTvmIntegrationV2:
         if client_jetton_balance < MIN_CLIENT_USDT_BALANCE:
             pytest.skip(
                 f"Client jetton wallet {self.client_jetton_wallet} needs at least {MIN_CLIENT_USDT_BALANCE} USDT units"
+            )
+
+    def _require_client_balances(self, address: str, jetton_wallet: str) -> None:
+        client_jetton_balance = self.provider.get_jetton_wallet_data(jetton_wallet).balance
+
+        if client_jetton_balance < MIN_CLIENT_USDT_BALANCE:
+            pytest.skip(
+                f"Client jetton wallet {jetton_wallet} needs at least {MIN_CLIENT_USDT_BALANCE} USDT units"
             )
 
     def test_server_should_successfully_verify_and_settle_tvm_payment_from_client(
@@ -281,8 +296,159 @@ class TestTvmIntegrationV2:
         )
         assert recipient_balance_after >= recipient_balance_before + int(TEST_PAYMENT_AMOUNT)
 
+    def test_server_should_batch_two_tvm_settlements_into_one_external_message(self, monkeypatch):
+        """Test live facilitator batching with two funded W5 clients.
+
+        TVM W5 wallets require each signed settlement to use the wallet's current on-chain seqno.
+        Because of that, a live batch cannot use two distinct settlements from the same payer wallet:
+        the second relay would hit a seqno mismatch after the first one executes. This test uses two
+        funded payer wallets to exercise the facilitator's batch-relay path on TON testnet.
+        """
+        self._require_live_balances()
+        if not TVM_SECOND_CLIENT_PRIVATE_KEY:
+            pytest.skip("TVM_SECOND_CLIENT_PRIVATE_KEY is required for the live TVM batch test")
+
+        second_client_config = WalletV5R1Config.from_private_key(
+            TVM_TESTNET,
+            TVM_SECOND_CLIENT_PRIVATE_KEY,
+        )
+        second_client_config.api_key = TONCENTER_API_KEY
+        second_client_config.base_url = TONCENTER_BASE_URL
+        second_client_signer = WalletV5R1MnemonicSigner(second_client_config)
+        second_client = x402ClientSync().register(
+            TVM_TESTNET,
+            ExactTvmClientScheme(second_client_signer),
+        )
+        second_client_address = second_client_signer.address
+        if second_client_address == self.client_address:
+            pytest.skip(
+                "TVM_SECOND_CLIENT_PRIVATE_KEY must point to a different funded W5 client wallet"
+            )
+        second_client_jetton_wallet = self.provider.get_jetton_wallet(
+            USDT_TESTNET_MINTER,
+            second_client_address,
+        )
+        self._require_client_balances(second_client_address, second_client_jetton_wallet)
+
+        facilitator = x402FacilitatorSync().register(
+            [TVM_TESTNET],
+            ExactTvmFacilitatorScheme(
+                self.facilitator_signer,
+                batch_flush_interval_seconds=5.0,
+                batch_flush_size=2,
+            ),
+        )
+        facilitator_client = TvmFacilitatorClientSync(facilitator)
+        server = x402ResourceServerSync(facilitator_client)
+        server.register(TVM_TESTNET, ExactTvmServerScheme())
+        server.initialize()
+
+        batch_build_calls: list[tuple[str, list[str], bool]] = []
+        send_calls: list[str] = []
+        original_build_batch = self.facilitator_signer.build_relay_external_boc_batch
+        original_send_message = self.facilitator_signer.send_external_message
+
+        def build_batch_spy(network: str, relay_requests: list, *, for_emulation: bool = False):
+            batch_build_calls.append(
+                (
+                    network,
+                    [relay_request.destination for relay_request in relay_requests],
+                    for_emulation,
+                )
+            )
+            return original_build_batch(
+                network,
+                relay_requests,
+                for_emulation=for_emulation,
+            )
+
+        def send_message_spy(network: str, external_boc: bytes) -> str:
+            send_calls.append(network)
+            return original_send_message(network, external_boc)
+
+        monkeypatch.setattr(
+            self.facilitator_signer,
+            "build_relay_external_boc_batch",
+            build_batch_spy,
+        )
+        monkeypatch.setattr(
+            self.facilitator_signer,
+            "send_external_message",
+            send_message_spy,
+        )
+
+        recipient_balance_before = self.provider.get_jetton_wallet_data(
+            self.facilitator_jetton_wallet
+        ).balance
+
+        accepts = [
+            build_tvm_payment_requirements(
+                self.facilitator_address,
+                TEST_PAYMENT_AMOUNT,
+            )
+        ]
+        payment_required = server.create_payment_required_response(accepts)
+        first_payload = self.client.create_payment_payload(payment_required)
+        second_payload = second_client.create_payment_payload(payment_required)
+
+        first_accepted = server.find_matching_requirements(accepts, first_payload)
+        second_accepted = server.find_matching_requirements(accepts, second_payload)
+        assert first_accepted is not None
+        assert second_accepted is not None
+
+        first_verify = server.verify_payment(first_payload, first_accepted)
+        second_verify = server.verify_payment(second_payload, second_accepted)
+        assert first_verify.is_valid is True
+        assert first_verify.payer == self.client_address
+        assert second_verify.is_valid is True
+        assert second_verify.payer == second_client_address
+
+        start_barrier = threading.Barrier(2)
+
+        def settle_payment(
+            payload: PaymentPayload, accepted: PaymentRequirements
+        ) -> SettleResponse:
+            start_barrier.wait(timeout=15.0)
+            return server.settle_payment(payload, accepted)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first_future = executor.submit(settle_payment, first_payload, first_accepted)
+            second_future = executor.submit(settle_payment, second_payload, second_accepted)
+            first_settle = first_future.result(timeout=180.0)
+            second_settle = second_future.result(timeout=180.0)
+
+        assert first_settle.success is True
+        assert first_settle.transaction != ""
+        assert first_settle.payer == self.client_address
+        assert second_settle.success is True
+        assert second_settle.transaction != ""
+        assert second_settle.payer == second_client_address
+
+        settlement_batch_build_calls = [
+            (network, destinations)
+            for network, destinations, for_emulation in batch_build_calls
+            if for_emulation is False
+        ]
+        assert len(settlement_batch_build_calls) == 1
+        assert settlement_batch_build_calls[0][0] == TVM_TESTNET
+        assert len(settlement_batch_build_calls[0][1]) == 2
+        assert set(settlement_batch_build_calls[0][1]) == {
+            self.client_address,
+            second_client_address,
+        }
+        assert send_calls == [TVM_TESTNET]
+
+        recipient_balance_after = _wait_for_jetton_balance_at_least(
+            self.provider,
+            self.facilitator_jetton_wallet,
+            recipient_balance_before + (2 * int(TEST_PAYMENT_AMOUNT)),
+        )
+        assert recipient_balance_after >= recipient_balance_before + (2 * int(TEST_PAYMENT_AMOUNT))
+
     def test_client_creates_valid_tvm_payment_payload(self) -> None:
         """Test that client creates properly structured TVM payload."""
+        self._require_live_balances()
+
         accepts = [
             build_tvm_payment_requirements(
                 self.facilitator_address,
@@ -312,6 +478,8 @@ class TestTvmIntegrationV2:
 
     def test_invalid_recipient_fails_verification(self) -> None:
         """Test that mismatched recipient fails verification."""
+        self._require_live_balances()
+
         accepts = [
             build_tvm_payment_requirements(
                 self.facilitator_address,
@@ -334,6 +502,8 @@ class TestTvmIntegrationV2:
 
     def test_insufficient_amount_fails_verification(self) -> None:
         """Test that insufficient amount fails verification."""
+        self._require_live_balances()
+
         accepts = [
             build_tvm_payment_requirements(
                 self.facilitator_address,
@@ -393,3 +563,108 @@ class TestTvmIntegrationV2:
         assert tvm_support.x402_version == 2
         assert tvm_support.extra is not None
         assert tvm_support.extra.get("areFeesSponsored") is True
+
+
+class TestTvmPriceParsing:
+    """Tests for TVM server price parsing via resource-server integration."""
+
+    def setup_method(self) -> None:
+        facilitator_config = HighloadV3Config.from_private_key(TVM_FACILITATOR_PRIVATE_KEY)
+        facilitator_config.api_key = TONCENTER_API_KEY
+        facilitator_config.toncenter_base_url = TONCENTER_BASE_URL
+        self.facilitator_signer = FacilitatorHighloadV3Signer({TVM_TESTNET: facilitator_config})
+        self.facilitator_address = self.facilitator_signer.get_addresses()[0]
+
+        self.facilitator = x402FacilitatorSync().register(
+            [TVM_TESTNET],
+            ExactTvmFacilitatorScheme(self.facilitator_signer),
+        )
+
+        facilitator_client = TvmFacilitatorClientSync(self.facilitator)
+        self.server = x402ResourceServerSync(facilitator_client)
+        self.tvm_server = ExactTvmServerScheme()
+        self.server.register(TVM_TESTNET, self.tvm_server)
+        self.server.initialize()
+
+    def teardown_method(self) -> None:
+        self.facilitator_signer.close()
+
+    def test_parse_money_formats(self) -> None:
+        test_cases = [
+            ("$1.00", "1000000"),
+            ("1.50", "1500000"),
+            (2.5, "2500000"),
+            ("$0.001", "1000"),
+        ]
+
+        for input_price, expected_amount in test_cases:
+            config = ResourceConfig(
+                scheme=SCHEME_EXACT,
+                pay_to=self.facilitator_address,
+                price=input_price,
+                network=TVM_TESTNET,
+            )
+            requirements = self.server.build_payment_requirements(config)
+
+            assert len(requirements) == 1
+            assert requirements[0].amount == expected_amount
+            assert requirements[0].asset == USDT_TESTNET_MINTER
+            assert requirements[0].extra.get("areFeesSponsored") is True
+
+    def test_asset_amount_passthrough(self) -> None:
+        from x402.schemas import AssetAmount
+
+        custom_asset = AssetAmount(
+            amount="5000000",
+            asset="0:" + "a" * 64,
+            extra={"foo": "bar"},
+        )
+
+        config = ResourceConfig(
+            scheme=SCHEME_EXACT,
+            pay_to=self.facilitator_address,
+            price=custom_asset,
+            network=TVM_TESTNET,
+        )
+        requirements = self.server.build_payment_requirements(config)
+
+        assert len(requirements) == 1
+        assert requirements[0].amount == "5000000"
+        assert requirements[0].asset == "0:" + "a" * 64
+        assert requirements[0].extra == {"foo": "bar"}
+
+    def test_custom_money_parser(self) -> None:
+        from x402.schemas import AssetAmount
+
+        def large_amount_parser(amount: float, network: str):
+            if amount > 100:
+                return AssetAmount(
+                    amount=str(int(amount * 1_000_000_000)),
+                    asset="0:" + "b" * 64,
+                    extra={"token": "LARGE", "tier": "large"},
+                )
+            return None
+
+        self.tvm_server.register_money_parser(large_amount_parser)
+
+        large_config = ResourceConfig(
+            scheme=SCHEME_EXACT,
+            pay_to=self.facilitator_address,
+            price=150,
+            network=TVM_TESTNET,
+        )
+        large_req = self.server.build_payment_requirements(large_config)
+
+        assert large_req[0].asset == "0:" + "b" * 64
+        assert large_req[0].extra.get("token") == "LARGE"
+        assert large_req[0].extra.get("tier") == "large"
+
+        small_config = ResourceConfig(
+            scheme=SCHEME_EXACT,
+            pay_to=self.facilitator_address,
+            price=50,
+            network=TVM_TESTNET,
+        )
+        small_req = self.server.build_payment_requirements(small_config)
+
+        assert small_req[0].asset == USDT_TESTNET_MINTER

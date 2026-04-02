@@ -54,6 +54,25 @@ client.register("eip155:*", ExactEvmScheme(signer=my_signer))
 payload = client.create_payment_payload(payment_required)
 ```
 
+### TVM Client (Async)
+
+```python
+import os
+
+from x402 import x402Client
+from x402.mechanisms.tvm import TVM_TESTNET, WalletV5R1Config, WalletV5R1MnemonicSigner
+from x402.mechanisms.tvm.exact import ExactTvmScheme
+
+tvm_config = WalletV5R1Config.from_private_key(
+    TVM_TESTNET,
+    os.environ["TVM_PRIVATE_KEY"],
+)
+tvm_config.api_key = os.environ.get("TONCENTER_API_KEY")
+
+client = x402Client()
+client.register(TVM_TESTNET, ExactTvmScheme(WalletV5R1MnemonicSigner(tvm_config)))
+```
+
 ### Server (Async)
 
 ```python
@@ -154,6 +173,10 @@ Use `from_config()` for declarative setup:
 
 ```python
 from x402 import x402Client, x402ClientConfig, SchemeRegistration
+from x402 import prefer_network
+from x402.mechanisms.evm.exact import ExactEvmScheme
+from x402.mechanisms.svm.exact import ExactSvmScheme
+from x402.mechanisms.tvm.exact import ExactTvmScheme
 
 config = x402ClientConfig(
     schemes=[

@@ -48,11 +48,11 @@ pnpm test
 ```
 
 Launches an interactive CLI where you can select:
-- **Facilitators** - Payment verification/settlement services (Go, TypeScript)
+- **Facilitators** - Payment verification/settlement services (Go, TypeScript, Python)
 - **Servers** - Protected endpoints requiring payment (Express, Gin, Hono, Next.js, FastAPI, Flask, etc.)
 - **Clients** - Payment-capable HTTP clients (axios, fetch, httpx, requests, etc.)
 - **Extensions** - Additional features like Bazaar discovery
-- **Protocols** - EVM, SVM, and/or Aptos networks
+- **Protocols** - EVM, SVM, Aptos, Stellar, and/or TVM networks
 
 Every valid combination of your selections will be tested. For example, selecting 2 facilitators, 3 servers, and 2 clients will generate and run all compatible test scenarios.
 
@@ -159,7 +159,7 @@ $ pnpm test --min
 ✔ Select servers › express, hono, legacy-express
 ✔ Select clients › axios, fetch, httpx
 ✔ Select extensions › bazaar
-✔ Select protocol families › EVM, SVM, Aptos, Stellar
+✔ Select protocol families › EVM, SVM, Aptos, Stellar, TVM
 
 📊 Coverage-Based Minimization
 Total scenarios: 156

@@ -10,11 +10,16 @@ from ....schemas import PaymentRequirements
 from ..codecs.common import decode_base64_boc, normalize_address
 from ..codecs.w5 import get_w5_seqno, serialize_out_list, serialize_send_msg_action
 from ..constants import (
+    DEFAULT_TVM_EMULATION_ADDRESS,
+    DEFAULT_TVM_EMULATION_RELAY_AMOUNT,
+    DEFAULT_TVM_EMULATION_SEQNO,
+    DEFAULT_TVM_EMULATION_WALLET_ID,
     DEFAULT_JETTON_WALLET_MESSAGE_AMOUNT,
     DEFAULT_TONCENTER_TIMEOUT_SECONDS,
     DEFAULT_TVM_INNER_GAS_BUFFER,
     JETTON_TRANSFER_OPCODE,
     SCHEME_EXACT,
+    SEND_MODE_IGNORE_ERRORS,
     SEND_MODE_PAY_FEES_SEPARATELY,
     SUPPORTED_NETWORKS,
     W5_EXTERNAL_SIGNED_OPCODE,
@@ -76,7 +81,7 @@ class ExactTvmScheme:
         valid_until = int(time.time()) + (
             requirements.max_timeout_seconds - 5
             if requirements.max_timeout_seconds > 10
-            else requirements.max_timeout_seconds // 2
+            else (requirements.max_timeout_seconds + 1) // 2
         )
         transfer_body = self._build_transfer_body(requirements)
         required_inner = self._estimate_required_inner_value(
@@ -120,31 +125,21 @@ class ExactTvmScheme:
     def _get_jetton_wallet(self, client: ToncenterV3Client, asset: str, payer: str) -> str:
         return client.get_jetton_wallet(asset, payer)
 
-    def _build_signed_body(
+    def _build_w5_signed_body(
         self,
         *,
-        source_wallet: str,
-        transfer_body: Cell,
+        out_message: Cell,
         seqno: int,
         valid_until: int,
-        attached_amount: int,
         opcode: int = W5_INTERNAL_SIGNED_OPCODE,
+        send_mode: int = SEND_MODE_PAY_FEES_SEPARATELY,
+        wallet_id: int | None = None,
     ) -> Cell:
-        out_msg = Contract.create_internal_msg(
-            src=None,
-            dest=Address(source_wallet),
-            bounce=True,
-            value=attached_amount,
-            body=transfer_body,
-        ).serialize()
-
-        actions = serialize_out_list(
-            [serialize_send_msg_action(out_msg, SEND_MODE_PAY_FEES_SEPARATELY)]
-        )
+        actions = serialize_out_list([serialize_send_msg_action(out_message, send_mode)])
         unsigned_body = (
             begin_cell()
             .store_uint(opcode, 32)
-            .store_uint(self._signer.wallet_id, 32)
+            .store_uint(self._signer.wallet_id if wallet_id is None else wallet_id, 32)
             .store_uint(valid_until, 32)
             .store_uint(seqno, 32)
             .store_maybe_ref(actions)
@@ -154,6 +149,34 @@ class ExactTvmScheme:
         signature = self._signer.sign_message(unsigned_body.hash)
         return (
             begin_cell().store_slice(unsigned_body.begin_parse()).store_bytes(signature).end_cell()
+        )
+
+    def _build_signed_body(
+        self,
+        *,
+        source_wallet: str,
+        transfer_body: Cell,
+        seqno: int,
+        valid_until: int,
+        attached_amount: int,
+        opcode: int = W5_INTERNAL_SIGNED_OPCODE,
+        send_mode: int = SEND_MODE_PAY_FEES_SEPARATELY,
+        wallet_id: int | None = None,
+    ) -> Cell:
+        out_msg = Contract.create_internal_msg(
+            src=None,
+            dest=Address(source_wallet),
+            bounce=True,
+            value=attached_amount,
+            body=transfer_body,
+        ).serialize()
+        return self._build_w5_signed_body(
+            out_message=out_msg,
+            seqno=seqno,
+            valid_until=valid_until,
+            opcode=opcode,
+            send_mode=send_mode,
+            wallet_id=wallet_id,
         )
 
     def _build_settlement_boc(self, payer: str, body: Cell, include_state_init: bool) -> str:
@@ -169,8 +192,8 @@ class ExactTvmScheme:
 
     def _build_transfer_body(self, requirements: PaymentRequirements) -> Cell:
         forward_ton_amount = int(requirements.extra.get("forwardTonAmount", 0))
-        if forward_ton_amount < 0 or forward_ton_amount > 10**9:
-            raise ValueError("Forward ton amount should be in range of [0, 1e9]")
+        if forward_ton_amount < 0:
+            raise ValueError("Forward ton amount should be >= 0")
         response_destination = requirements.extra.get("responseDestination")
 
         transfer_body = (
@@ -204,20 +227,37 @@ class ExactTvmScheme:
     ) -> int:
         forward_ton_amount = int(requirements.extra.get("forwardTonAmount", 0))
         provisional_value = DEFAULT_JETTON_WALLET_MESSAGE_AMOUNT + forward_ton_amount
-        external_body = self._build_signed_body(
+        payer_body = self._build_signed_body(
             source_wallet=source_wallet,
             transfer_body=transfer_body,
             seqno=seqno,
             valid_until=valid_until,
             attached_amount=provisional_value,
+        )
+        relay_message = Contract.create_internal_msg(
+            src=None,
+            dest=Address(self._signer.address),
+            bounce=True,
+            value=DEFAULT_TVM_EMULATION_RELAY_AMOUNT,
+            state_init=self._signer.state_init if include_state_init else None,
+            body=payer_body,
+        ).serialize()
+        external_body = self._build_w5_signed_body(
+            out_message=relay_message,
+            seqno=DEFAULT_TVM_EMULATION_SEQNO,
+            valid_until=valid_until,
             opcode=W5_EXTERNAL_SIGNED_OPCODE,
+            send_mode=SEND_MODE_PAY_FEES_SEPARATELY + SEND_MODE_IGNORE_ERRORS,
+            wallet_id=DEFAULT_TVM_EMULATION_WALLET_ID,
         )
         external_message = Contract.create_external_msg(
-            dest=Address(self._signer.address),
-            state_init=self._signer.state_init if include_state_init else None,
+            dest=Address(DEFAULT_TVM_EMULATION_ADDRESS),
             body=external_body,
         )
-        trace = client.emulate_trace(external_message.serialize().to_boc())
+        trace = client.emulate_trace(
+            external_message.serialize().to_boc(),
+            ignore_chksig=True,
+        )
         transactions = parse_trace_transactions(trace)
 
         source_wallet_tx = None
@@ -261,13 +301,11 @@ class ExactTvmScheme:
         compute_fee_destination = trace_transaction_compute_fees(receiver_wallet_tx)
         storage_fees_source = trace_transaction_storage_fees(source_wallet_tx)
 
-        return max(
-            forward_fees * 2,
+        return (
             DEFAULT_TVM_INNER_GAS_BUFFER
             + forward_fees
             + compute_fee_source
             + compute_fee_destination
             + forward_ton_amount
             + storage_fees_source
-            - source_wallet_balance,
         )

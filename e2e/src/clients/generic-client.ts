@@ -18,20 +18,38 @@ export class GenericClientProxy extends BaseProxy implements ClientProxy {
 
   async call(config: ClientConfig): Promise<ClientCallResult> {
     try {
-      const runConfig: RunConfig = {
-        env: {
-          EVM_PRIVATE_KEY: config.evmPrivateKey,
-          SVM_PRIVATE_KEY: config.svmPrivateKey,
-          APTOS_PRIVATE_KEY: config.aptosPrivateKey,
-          STELLAR_PRIVATE_KEY: config.stellarPrivateKey,
-          TVM_PRIVATE_KEY: config.tvmPrivateKey,
-          RESOURCE_SERVER_URL: config.serverUrl,
-          ENDPOINT_PATH: config.endpointPath,
-          EVM_NETWORK: config.evmNetwork,
-          EVM_RPC_URL: config.evmRpcUrl,
-          TVM_NETWORK: config.tvmNetwork,
-          TONCENTER_BASE_URL: process.env.TONCENTER_BASE_URL || config.tvmRpcUrl,
+      const baseEnv: Record<string, string> = {
+        EVM_PRIVATE_KEY: config.evmPrivateKey,
+        SVM_PRIVATE_KEY: config.svmPrivateKey,
+        APTOS_PRIVATE_KEY: config.aptosPrivateKey,
+        STELLAR_PRIVATE_KEY: config.stellarPrivateKey,
+        TVM_PRIVATE_KEY: config.tvmPrivateKey,
+        RESOURCE_SERVER_URL: config.serverUrl,
+        ENDPOINT_PATH: config.endpointPath,
+        EVM_NETWORK: config.evmNetwork,
+        EVM_RPC_URL: config.evmRpcUrl,
+        TVM_NETWORK: config.tvmNetwork,
+        TONCENTER_BASE_URL: process.env.TONCENTER_BASE_URL || config.tvmRpcUrl,
+      };
+
+      const clientConfig = this.loadConfig();
+      if (clientConfig?.environment?.required) {
+        for (const envVar of clientConfig.environment.required) {
+          if (process.env[envVar] && !baseEnv[envVar]) {
+            baseEnv[envVar] = process.env[envVar]!;
+          }
         }
+      }
+      if (clientConfig?.environment?.optional) {
+        for (const envVar of clientConfig.environment.optional) {
+          if (process.env[envVar] && !baseEnv[envVar]) {
+            baseEnv[envVar] = process.env[envVar]!;
+          }
+        }
+      }
+
+      const runConfig: RunConfig = {
+        env: baseEnv
       };
 
       // For clients, we run the process and wait for it to complete
@@ -74,4 +92,20 @@ export class GenericClientProxy extends BaseProxy implements ClientProxy {
   async forceStop(): Promise<void> {
     await this.stopProcess();
   }
-} 
+
+  private loadConfig(): any {
+    try {
+      const { readFileSync, existsSync } = require('fs');
+      const { join } = require('path');
+      const configPath = join(this.directory, 'test.config.json');
+
+      if (existsSync(configPath)) {
+        const configContent = readFileSync(configPath, 'utf-8');
+        return JSON.parse(configContent);
+      }
+    } catch {
+      // Fall back to the explicitly provided env set when config loading fails.
+    }
+    return null;
+  }
+}

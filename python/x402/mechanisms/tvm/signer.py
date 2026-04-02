@@ -21,6 +21,10 @@ class FacilitatorTvmSigner(Protocol):
         """Get all facilitator wallet addresses."""
         ...
 
+    def get_addresses_for_network(self, network: str) -> list[str]:
+        """Get facilitator wallet addresses available for one TVM network."""
+        ...
+
     def get_account_state(self, address: str, network: str) -> TvmAccountState:
         """Get account state for a wallet or jetton wallet."""
         ...

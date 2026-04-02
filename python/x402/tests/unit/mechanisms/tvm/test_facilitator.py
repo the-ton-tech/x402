@@ -1,598 +1,228 @@
-"""Tests for TVM exact facilitator settlement confirmation."""
+"""Tests for the exact TVM facilitator scheme."""
 
 from __future__ import annotations
 
 import base64
-import threading
 import time
-from dataclasses import replace
 
 import pytest
 
 pytest.importorskip("pytoniq_core")
 
-from pytoniq.contract.contract import Contract
-from pytoniq_core import Address, Cell, begin_cell
-from pytoniq_core.tlb.transaction import MessageAny
+from pytoniq_core import begin_cell
 
+import x402.mechanisms.tvm.exact.facilitator as facilitator_module
 from x402.mechanisms.tvm import (
+    ERR_DUPLICATE_SETTLEMENT,
+    ERR_INVALID_AMOUNT,
+    ERR_INVALID_ASSET,
     ERR_INVALID_JETTON_TRANSFER,
-    ERR_INVALID_SETTLEMENT_BOC,
-    ERR_INVALID_W5_ACTIONS,
+    ERR_INVALID_RECIPIENT,
+    ERR_INVALID_SIGNATURE,
+    ERR_INVALID_UNTIL_EXPIRED,
+    ERR_NETWORK_MISMATCH,
+    ERR_SIMULATION_FAILED,
+    ERR_TRANSACTION_FAILED,
+    ERR_UNSUPPORTED_NETWORK,
+    ERR_UNSUPPORTED_SCHEME,
+    ERR_VALID_UNTIL_TOO_FAR,
     TVM_TESTNET,
-    address_from_state_init,
-    build_w5r1_state_init,
-)
-from x402.mechanisms.tvm.codecs.w5 import (
-    parse_out_list,
-    serialize_out_list,
-    serialize_send_msg_action,
-)
-from x402.mechanisms.tvm.constants import W5_INTERNAL_SIGNED_OPCODE
-from x402.mechanisms.tvm.exact.client import ExactTvmScheme as ExactTvmClientScheme
-from x402.mechanisms.tvm.exact.facilitator import ExactTvmScheme
-from x402.mechanisms.tvm.types import (
     ParsedJettonTransfer,
     ParsedTvmSettlement,
+    SettlementCache,
     TvmAccountState,
     TvmJettonWalletData,
     TvmRelayRequest,
-    W5InitData,
 )
-from x402.schemas import (
-    PaymentPayload,
-    PaymentRequirements,
-    ResourceInfo,
-    VerifyResponse,
-)
+from x402.mechanisms.tvm.constants import DEFAULT_TVM_OUTER_GAS_BUFFER
+from x402.mechanisms.tvm.exact import ExactTvmFacilitatorScheme
+from x402.mechanisms.tvm.trace_utils import body_hash_to_base64
+from x402.schemas import PaymentPayload, PaymentRequirements, ResourceInfo
 
 PAYER = "0:" + "1" * 64
 MERCHANT = "0:" + "2" * 64
 ASSET = "0:" + "3" * 64
-SOURCE_WALLET_1 = "0:" + "4" * 64
-SOURCE_WALLET_2 = "0:" + "5" * 64
-RECEIVER_WALLET = "0:" + "6" * 64
-RESPONSE_DESTINATION = "0:" + "7" * 64
+SOURCE_WALLET = "0:" + "4" * 64
+FACILITATOR = "0:" + "f" * 64
 EMPTY_FORWARD_PAYLOAD = begin_cell().store_bit(0).end_cell()
 EMPTY_FORWARD_PAYLOAD_B64 = base64.b64encode(EMPTY_FORWARD_PAYLOAD.to_boc()).decode("ascii")
-PAYER_TX_HASH_1 = "a" * 64
-PAYER_TX_HASH_2 = "b" * 64
 
 
-class FakeCell:
+class _FakeCell:
     def __init__(self, raw_hash: bytes) -> None:
         self.hash = raw_hash
 
 
-class MockSigner:
-    def __init__(self, finalized_trace: dict[str, object]) -> None:
-        self.finalized_trace = finalized_trace
-        self.sent_batches: list[list[TvmRelayRequest]] = []
-
-    def get_addresses(self) -> list[str]:
-        return ["0:" + "f" * 64]
-
-    def get_jetton_wallet(self, asset: str, owner: str, network: str) -> str:
-        _ = asset, owner, network
-        return SOURCE_WALLET_1
-
-    def build_relay_external_boc_batch(
+class _FakeBatcher:
+    def __init__(
         self,
-        network: str,
-        relay_requests: list[TvmRelayRequest],
+        signer,
+        settlement_cache,
         *,
-        for_emulation: bool = False,
-    ) -> bytes:
-        _ = network, for_emulation
-        self.sent_batches.append(relay_requests)
-        return b"external-boc"
+        flush_interval_seconds: float,
+        batch_flush_size: int,
+        confirmation_timeout_seconds: float,
+    ) -> None:
+        _ = signer, settlement_cache, flush_interval_seconds, batch_flush_size
+        _ = confirmation_timeout_seconds
+        self.enqueued: list[object] = []
+        self.result = facilitator_module._BatchResult(success=True, transaction="trace-tx-hash")
+        self.error: Exception | None = None
 
-    def send_external_message(self, network: str, external_boc: bytes) -> str:
-        _ = network, external_boc
-        return "trace-hash-1"
-
-    def wait_for_trace_confirmation(
-        self,
-        network: str,
-        trace_external_hash_norm: str,
-        *,
-        timeout_seconds: float,
-    ) -> dict[str, object]:
-        _ = network, trace_external_hash_norm, timeout_seconds
-        return self.finalized_trace
+    def enqueue(self, queued_settlement):
+        self.enqueued.append(queued_settlement)
+        if self.error is not None:
+            raise self.error
+        return self.result
 
 
-class _VerificationSigner:
-    def __init__(self, emulation_trace: dict[str, object]) -> None:
-        self.emulation_trace = emulation_trace
-
-    def get_addresses(self) -> list[str]:
-        return ["0:" + "f" * 64]
-
-    def get_account_state(self, address: str, network: str) -> TvmAccountState:
-        _ = network
-        return TvmAccountState(
-            address=address,
+class _SignerStub:
+    def __init__(self) -> None:
+        self.account_state = TvmAccountState(
+            address=PAYER,
             balance=0,
             is_active=True,
             is_uninitialized=False,
             state_init=None,
         )
-
-    def get_jetton_wallet(self, asset: str, owner: str, network: str) -> str:
-        _ = asset, network
-        if owner == PAYER:
-            return SOURCE_WALLET_1
-        if owner == MERCHANT:
-            return RECEIVER_WALLET
-        raise AssertionError(f"Unexpected owner {owner}")
-
-    def get_jetton_wallet_data(self, address: str, network: str) -> TvmJettonWalletData:
-        _ = network
-        return TvmJettonWalletData(
-            address=address,
-            balance=1_000_000_000,
+        self.jetton_wallet_data = TvmJettonWalletData(
+            address=SOURCE_WALLET,
+            balance=1_000_000,
             owner=PAYER,
             jetton_minter=ASSET,
         )
+        self.last_relay_request: TvmRelayRequest | None = None
+
+    def get_addresses(self) -> list[str]:
+        return [FACILITATOR]
+
+    def get_addresses_for_network(self, network: str) -> list[str]:
+        assert network == TVM_TESTNET
+        return [FACILITATOR]
+
+    def get_account_state(self, address: str, network: str) -> TvmAccountState:
+        assert address == PAYER
+        assert network == TVM_TESTNET
+        return self.account_state
+
+    def get_jetton_wallet(self, asset: str, owner: str, network: str) -> str:
+        assert asset == ASSET
+        assert owner == PAYER
+        assert network == TVM_TESTNET
+        return SOURCE_WALLET
+
+    def get_jetton_wallet_data(self, address: str, network: str) -> TvmJettonWalletData:
+        assert address == SOURCE_WALLET
+        assert network == TVM_TESTNET
+        return self.jetton_wallet_data
 
     def build_relay_external_boc(
-        self,
-        network: str,
-        relay_request: TvmRelayRequest,
-        *,
-        for_emulation: bool = False,
+        self, network: str, relay_request: TvmRelayRequest, *, for_emulation: bool = False
     ) -> bytes:
-        _ = network, relay_request, for_emulation
+        assert network == TVM_TESTNET
+        assert for_emulation is True
+        self.last_relay_request = relay_request
         return b"external-boc"
 
     def emulate_external_message(self, network: str, external_boc: bytes) -> dict[str, object]:
-        _ = network, external_boc
-        return self.emulation_trace
+        assert network == TVM_TESTNET
+        assert external_boc == b"external-boc"
+        return {"transactions": {}}
 
 
-class _PayloadSignerStub:
-    def __init__(self) -> None:
-        self._wallet_id = 1
-        self._state_init = build_w5r1_state_init(b"\x11" * 32, self._wallet_id)
-        self._address = address_from_state_init(self._state_init, 0)
-
-    @property
-    def address(self) -> str:
-        return self._address
-
-    @property
-    def network(self) -> str:
-        return TVM_TESTNET
-
-    @property
-    def wallet_id(self) -> int:
-        return self._wallet_id
-
-    @property
-    def state_init(self):
-        return self._state_init
-
-    def sign_message(self, message: bytes) -> bytes:
-        _ = message
-        return b"\x00" * 64
-
-
-class _PayloadClientStub:
-    def get_account_state(self, address: str) -> TvmAccountState:
-        return TvmAccountState(
-            address=address,
-            balance=0,
-            is_active=False,
-            is_uninitialized=True,
-            state_init=None,
-        )
-
-    def get_jetton_wallet(self, asset: str, owner: str) -> str:
-        _ = asset
-        return SOURCE_WALLET_1 if owner == _PayloadSignerStub().address else RECEIVER_WALLET
-
-    def get_jetton_wallet_data(self, address: str) -> TvmJettonWalletData:
-        return TvmJettonWalletData(
-            address=address,
-            balance=0,
-            owner=_PayloadSignerStub().address if address == SOURCE_WALLET_1 else MERCHANT,
-            jetton_minter=ASSET,
-        )
-
-    def emulate_trace(self, boc: bytes) -> dict[str, object]:
-        _ = boc
-        return {
-            "transactions": {
-                "source": {
-                    "account": SOURCE_WALLET_1,
-                    "account_state_before": {"balance": "1000000"},
-                    "description": {
-                        "aborted": False,
-                        "action": {"success": True},
-                        "compute_ph": {
-                            "success": True,
-                            "skipped": False,
-                            "gas_fees": "300000",
-                        },
-                        "storage_ph": {
-                            "storage_fees_collected": "500000",
-                        },
-                    },
-                    "in_msg": {
-                        "hash": "payer-out-hash",
-                        "hash_norm": "payer-out-hash",
-                        "source": _PayloadSignerStub().address,
-                        "destination": SOURCE_WALLET_1,
-                        "decoded_opcode": "jetton_transfer",
-                    },
-                    "out_msgs": [
-                        {
-                            "hash": "source-out-hash",
-                            "hash_norm": "source-out-hash",
-                            "fwd_fee": "200000",
-                            "source": SOURCE_WALLET_1,
-                            "destination": RECEIVER_WALLET,
-                            "decoded_opcode": "jetton_internal_transfer",
-                            "message_content": {
-                                "decoded": {
-                                    "@type": "jetton_internal_transfer",
-                                }
-                            },
-                        }
-                    ],
-                },
-                "receiver": {
-                    "account": RECEIVER_WALLET,
-                    "description": {
-                        "aborted": False,
-                        "action": {"success": True},
-                        "compute_ph": {
-                            "success": True,
-                            "skipped": False,
-                            "gas_fees": "400000",
-                        },
-                    },
-                    "in_msg": {
-                        "hash": "source-out-hash",
-                        "hash_norm": "source-out-hash",
-                        "source": SOURCE_WALLET_1,
-                        "destination": RECEIVER_WALLET,
-                        "decoded_opcode": "jetton_internal_transfer",
-                    },
-                },
-            }
-        }
-
-
-def _make_emulation_trace(
-    *,
-    settlement: ParsedTvmSettlement,
-    receiver_wallet: str = RECEIVER_WALLET,
-    payer_compute_fee: int = 700_000,
-    payer_storage_fee: int = 600_000,
-    payer_fwd_fees: list[int] | None = None,
-    source_wallet_balance: int = 1_000_000,
-    source_wallet_fwd_fees: list[int] | None = None,
-    source_wallet_compute_fee: int = 300_000,
-    source_wallet_storage_fee: int = 500_000,
-    receiver_wallet_compute_fee: int = 400_000,
-) -> dict[str, object]:
-    payer_out_hash = "payer-out-hash"
-    source_out_hashes = [f"source-out-hash-{idx}" for idx in range(3)]
-    payer_fees = payer_fwd_fees or [800_000]
-    source_fees = source_wallet_fwd_fees or [200_000]
-    out_msgs = [
-        {
-            "hash": payer_out_hash,
-            "hash_norm": payer_out_hash,
-            "destination": settlement.transfer.source_wallet,
-            "message_content": {
-                "hash": _hash_string(settlement.transfer.body_hash or b""),
-            },
-            "fwd_fee": str(fee),
-        }
-        for fee in payer_fees
-    ]
-
-    source_out_msgs = [
-        {
-            "hash": source_out_hashes[idx],
-            "hash_norm": source_out_hashes[idx],
-            "fwd_fee": str(fee),
-        }
-        for idx, fee in enumerate(source_fees)
-    ]
-    return {
-        "transactions": {
-            "payer-wallet-tx": {
-                "hash": PAYER_TX_HASH_1,
-                "account": PAYER,
-                "description": {
-                    "aborted": False,
-                    "action": {"success": True},
-                    "compute_ph": {
-                        "success": True,
-                        "skipped": False,
-                        "gas_fees": str(payer_compute_fee),
-                    },
-                    "storage_ph": {
-                        "storage_fees_collected": str(payer_storage_fee),
-                    },
-                },
-                "in_msg": {
-                    "message_content": {
-                        "hash": _hash_string(settlement.body.hash),
-                    },
-                },
-                "out_msgs": out_msgs,
-            },
-            "source-wallet-tx": {
-                "hash": "source-wallet-tx",
-                "account": settlement.transfer.source_wallet,
-                "account_state_before": {"balance": str(source_wallet_balance)},
-                "description": {
-                    "aborted": False,
-                    "action": {"success": True},
-                    "compute_ph": {
-                        "success": True,
-                        "skipped": False,
-                        "gas_fees": str(source_wallet_compute_fee),
-                    },
-                    "storage_ph": {
-                        "storage_fees_collected": str(source_wallet_storage_fee),
-                    },
-                },
-                "in_msg": {"hash": payer_out_hash, "hash_norm": payer_out_hash},
-                "out_msgs": source_out_msgs,
-            },
-            "receiver-wallet-tx": {
-                "hash": "receiver-wallet-tx",
-                "account": receiver_wallet,
-                "description": {
-                    "aborted": False,
-                    "action": {"success": True},
-                    "compute_ph": {
-                        "success": True,
-                        "skipped": False,
-                        "gas_fees": str(receiver_wallet_compute_fee),
-                    },
-                },
-                "in_msg": {
-                    "hash": source_out_hashes[0],
-                    "hash_norm": source_out_hashes[0],
-                },
-            },
-        }
-    }
-
-
-def _make_real_settlement_boc_with_mode(mode: int) -> str:
-    client_scheme = ExactTvmClientScheme(_PayloadSignerStub())
-    client_scheme._get_client = lambda network: _PayloadClientStub()  # type: ignore[method-assign]
-
-    payload = client_scheme.create_payment_payload(
-        PaymentRequirements(
-            scheme="exact",
-            network=TVM_TESTNET,
-            asset=ASSET,
-            amount="100",
-            pay_to=MERCHANT,
-            max_timeout_seconds=300,
-            extra={"areFeesSponsored": True},
-        )
+def _make_settlement(**overrides) -> ParsedTvmSettlement:
+    transfer = ParsedJettonTransfer(
+        source_wallet=overrides.pop("source_wallet", SOURCE_WALLET),
+        destination=overrides.pop("destination", MERCHANT),
+        response_destination=overrides.pop("response_destination", None),
+        jetton_amount=overrides.pop("jetton_amount", 100),
+        attached_ton_amount=overrides.pop("attached_ton_amount", 500_000),
+        forward_ton_amount=overrides.pop("forward_ton_amount", 0),
+        forward_payload=overrides.pop("forward_payload", EMPTY_FORWARD_PAYLOAD),
+        body_hash=overrides.pop("body_hash", b"transfer-body-hash"),
+    )
+    return ParsedTvmSettlement(
+        payer=overrides.pop("payer", PAYER),
+        wallet_id=overrides.pop("wallet_id", 777),
+        valid_until=overrides.pop("valid_until", int(time.time()) + 120),
+        seqno=overrides.pop("seqno", 12),
+        settlement_hash=overrides.pop("settlement_hash", "settlement-hash-1"),
+        body=overrides.pop("body", _FakeCell(b"body-hash")),
+        signed_slice_hash=overrides.pop("signed_slice_hash", b"signed-slice"),
+        signature=overrides.pop("signature", b"signature"),
+        state_init=overrides.pop("state_init", None),
+        transfer=transfer,
+        **overrides,
     )
 
-    message = MessageAny.deserialize(
-        Cell.one_from_boc(base64.b64decode(payload["settlementBoc"])).begin_parse()
-    )
-    body_slice = message.body.begin_parse()
-    opcode = body_slice.load_uint(32)
-    wallet_id = body_slice.load_uint(32)
-    valid_until = body_slice.load_uint(32)
-    seqno = body_slice.load_uint(32)
-    has_actions = body_slice.load_bit()
-    actions = parse_out_list(body_slice.load_ref()) if has_actions else []
-    has_extra_actions = body_slice.load_bit()
-    signature = body_slice.load_bytes(64)
 
-    assert opcode == W5_INTERNAL_SIGNED_OPCODE
-    assert len(actions) == 1
-
-    mutated_actions = serialize_out_list(
-        [serialize_send_msg_action(actions[0].out_msg.serialize(), mode=mode)]
-    )
-    mutated_body = (
-        begin_cell()
-        .store_uint(opcode, 32)
-        .store_uint(wallet_id, 32)
-        .store_uint(valid_until, 32)
-        .store_uint(seqno, 32)
-        .store_maybe_ref(mutated_actions)
-        .store_bit(has_extra_actions)
-        .store_bytes(signature)
-        .end_cell()
-    )
-    mutated_message = Contract.create_internal_msg(
-        src=None,
-        dest=Address(_PayloadSignerStub().address),
-        bounce=True,
-        value=0,
-        state_init=message.init,
-        body=mutated_body,
-    )
-    return base64.b64encode(mutated_message.serialize().to_boc()).decode("utf-8")
-
-
-def _make_requirements(
-    *, amount: str, response_destination: str | None = None
-) -> PaymentRequirements:
+def _make_requirements(**overrides) -> PaymentRequirements:
     extra = {
         "areFeesSponsored": True,
         "forwardPayload": EMPTY_FORWARD_PAYLOAD_B64,
         "forwardTonAmount": "0",
     }
-    if response_destination is not None:
-        extra["responseDestination"] = response_destination
-
+    extra.update(overrides.pop("extra", {}))
     return PaymentRequirements(
         scheme="exact",
-        network=TVM_TESTNET,
-        asset=ASSET,
-        amount=amount,
-        pay_to=MERCHANT,
-        max_timeout_seconds=300,
+        network=overrides.pop("network", TVM_TESTNET),
+        asset=overrides.pop("asset", ASSET),
+        amount=overrides.pop("amount", "100"),
+        pay_to=overrides.pop("pay_to", MERCHANT),
+        max_timeout_seconds=overrides.pop("max_timeout_seconds", 300),
         extra=extra,
+        **overrides,
     )
 
 
-def _make_payload(
-    settlement_boc: str, *, amount: str, response_destination: str | None = None
-) -> PaymentPayload:
+def _make_payload(**overrides) -> PaymentPayload:
+    accepted_extra = {
+        "areFeesSponsored": True,
+        "forwardPayload": EMPTY_FORWARD_PAYLOAD_B64,
+        "forwardTonAmount": "0",
+    }
+    accepted_extra.update(overrides.pop("accepted_extra", {}))
     return PaymentPayload(
-        x402_version=2,
+        x402_version=overrides.pop("x402_version", 2),
         resource=ResourceInfo(
-            url="https://example.com/protected",
-            description="test",
+            url="http://example.com/protected",
+            description="Test resource",
             mime_type="application/json",
         ),
-        accepted=_make_requirements(amount=amount, response_destination=response_destination),
+        accepted=PaymentRequirements(
+            scheme=overrides.pop("accepted_scheme", "exact"),
+            network=overrides.pop("accepted_network", TVM_TESTNET),
+            asset=overrides.pop("accepted_asset", ASSET),
+            amount=overrides.pop("accepted_amount", "100"),
+            pay_to=overrides.pop("accepted_pay_to", MERCHANT),
+            max_timeout_seconds=overrides.pop("accepted_max_timeout_seconds", 300),
+            extra=accepted_extra,
+        ),
         payload={
-            "settlementBoc": settlement_boc,
-            "asset": ASSET,
+            "settlementBoc": overrides.pop("settlement_boc", "base64-boc=="),
+            "asset": overrides.pop("payload_asset", ASSET),
         },
+        **overrides,
     )
 
 
-def _make_settlement(
-    *, settlement_hash: str, source_wallet: str, amount: int, attached_ton_amount: int = 0
-) -> ParsedTvmSettlement:
-    body_hash = f"{settlement_hash}-body".encode("ascii")
-    transfer_body_hash = f"{settlement_hash}-transfer".encode("ascii")
-    return ParsedTvmSettlement(
-        payer=PAYER,
-        wallet_id=1,
-        valid_until=int(time.time()) + 60,
-        seqno=1,
-        settlement_hash=settlement_hash,
-        body=FakeCell(body_hash),  # type: ignore[arg-type]
-        signed_slice_hash=b"",
-        signature=b"",
-        state_init=None,
-        transfer=ParsedJettonTransfer(
-            source_wallet=source_wallet,
-            destination=MERCHANT,
-            response_destination=None,
-            jetton_amount=amount,
-            attached_ton_amount=attached_ton_amount,
-            forward_ton_amount=0,
-            forward_payload=EMPTY_FORWARD_PAYLOAD,
-            body_hash=transfer_body_hash,
-        ),
-    )
+@pytest.fixture
+def facilitator_env(monkeypatch):
+    batchers: list[_FakeBatcher] = []
 
+    def _batcher_factory(*args, **kwargs):
+        batcher = _FakeBatcher(*args, **kwargs)
+        batchers.append(batcher)
+        return batcher
 
-def _hash_string(raw_hash: bytes) -> str:
-    return base64.b64encode(raw_hash).decode("ascii")
-
-
-def _make_finalized_trace(
-    *,
-    settlement: ParsedTvmSettlement,
-    payer_tx_hash: str = PAYER_TX_HASH_1,
-    source_wallet_tx_hash: str = "source-wallet-tx-1",
-    include_action: bool = True,
-    include_source_wallet_tx: bool = True,
-) -> dict[str, object]:
-    payer_out_hash = f"{source_wallet_tx_hash}-in".encode("ascii")
-    action: dict[str, object] = {
-        "type": "jetton_transfer",
-        "success": True,
-        "details": {
-            "asset": ASSET,
-            "receiver": MERCHANT,
-            "sender": PAYER,
-            "sender_jetton_wallet": settlement.transfer.source_wallet,
-            "amount": str(settlement.transfer.jetton_amount),
-        },
-    }
-    transactions: dict[str, object] = {
-        "payer-wallet-tx": {
-            "hash": payer_tx_hash,
-            "account": PAYER,
-            "description": {
-                "aborted": False,
-                "action": {"success": True},
-                "compute_ph": {"success": True, "skipped": False},
-            },
-            "in_msg": {
-                "message_content": {
-                    "hash": _hash_string(settlement.body.hash),
-                },
-            },
-            "out_msgs": [
-                {
-                    "hash": _hash_string(payer_out_hash),
-                    "hash_norm": _hash_string(payer_out_hash),
-                    "destination": settlement.transfer.source_wallet,
-                    "message_content": {
-                        "hash": _hash_string(settlement.transfer.body_hash or b""),
-                    },
-                }
-            ],
-        },
-    }
-    if include_source_wallet_tx:
-        transactions[source_wallet_tx_hash] = {
-            "hash": source_wallet_tx_hash,
-            "account": settlement.transfer.source_wallet,
-            "description": {
-                "aborted": False,
-                "action": {"success": True},
-                "compute_ph": {"success": True, "skipped": False},
-            },
-            "in_msg": {
-                "hash": _hash_string(payer_out_hash),
-                "hash_norm": _hash_string(payer_out_hash),
-            },
-        }
-
-    return {
-        "type": "trace",
-        "trace_external_hash_norm": "trace-hash-1",
-        "transactions": transactions,
-        "actions": [action] if include_action else [],
-    }
-
-
-def _patch_scheme_verification(
-    monkeypatch, scheme: ExactTvmScheme, settlements: dict[str, ParsedTvmSettlement]
-) -> None:
+    signer = _SignerStub()
+    settlement = _make_settlement()
+    monkeypatch.setattr(facilitator_module, "_SettlementBatcher", _batcher_factory)
+    monkeypatch.setattr(facilitator_module, "parse_exact_tvm_payload", lambda boc: settlement)
     monkeypatch.setattr(
-        "x402.mechanisms.tvm.exact.facilitator.parse_exact_tvm_payload",
-        lambda settlement_boc: settlements[settlement_boc],
-    )
-    monkeypatch.setattr(
-        scheme,
-        "_verify",
-        lambda payload, requirements, tvm_payload, settlement: (
-            VerifyResponse(is_valid=True, payer=settlement.payer),
-            TvmRelayRequest(destination=settlement.payer, body=None, state_init=None),  # type: ignore[arg-type]
-        ),
-    )
-
-
-def _patch_live_verification_dependencies(
-    monkeypatch,
-    settlement: ParsedTvmSettlement,
-) -> None:
-    monkeypatch.setattr(
-        "x402.mechanisms.tvm.exact.facilitator.parse_exact_tvm_payload",
-        lambda settlement_boc: settlement,
-    )
-    monkeypatch.setattr(
-        "x402.mechanisms.tvm.exact.facilitator.parse_active_w5_account_state",
-        lambda account: W5InitData(
+        facilitator_module,
+        "parse_active_w5_account_state",
+        lambda account: facilitator_module.W5InitData(
             signature_allowed=True,
             seqno=settlement.seqno,
             wallet_id=settlement.wallet_id,
@@ -600,598 +230,362 @@ def _patch_live_verification_dependencies(
             extensions_dict=None,
         ),
     )
+    monkeypatch.setattr(facilitator_module, "verify_w5_signature", lambda *args: True)
     monkeypatch.setattr(
-        "x402.mechanisms.tvm.exact.facilitator.verify_w5_signature",
-        lambda public_key, signed_slice_hash, signature: True,
+        facilitator_module,
+        "trace_transaction_storage_fees",
+        lambda tx: 10_000,
+    )
+    monkeypatch.setattr(
+        facilitator_module,
+        "trace_transaction_compute_fees",
+        lambda tx: 20_000,
+    )
+    monkeypatch.setattr(
+        facilitator_module,
+        "trace_transaction_fwd_fees",
+        lambda tx: 30_000,
+    )
+    monkeypatch.setattr(
+        ExactTvmFacilitatorScheme,
+        "_verify_finalized_trace_settlement",
+        staticmethod(lambda *args, **kwargs: {"hash": "payer-tx"}),
     )
 
-
-def test_settle_succeeds_when_finalized_trace_contains_matching_jetton_transfer(
-    monkeypatch,
-):
-    settlement = _make_settlement(
-        settlement_hash="settlement-1", source_wallet=SOURCE_WALLET_1, amount=100
-    )
-    signer = MockSigner(_make_finalized_trace(settlement=settlement))
-    scheme = ExactTvmScheme(signer, batch_flush_interval_seconds=0.0, batch_max_size=1)
-    _patch_scheme_verification(monkeypatch, scheme, {"boc-1": settlement})
-
-    response = scheme.settle(_make_payload("boc-1", amount="100"), _make_requirements(amount="100"))
-
-    assert response.success is True
-    assert response.transaction == PAYER_TX_HASH_1
-    assert response.error_reason is None
-
-
-def test_settle_succeeds_when_finalized_trace_has_no_actions_but_transaction_chain_matches(
-    monkeypatch,
-):
-    settlement = _make_settlement(
-        settlement_hash="settlement-1", source_wallet=SOURCE_WALLET_1, amount=100
-    )
-    signer = MockSigner(_make_finalized_trace(settlement=settlement, include_action=False))
-    scheme = ExactTvmScheme(signer, batch_flush_interval_seconds=0.0, batch_max_size=1)
-    _patch_scheme_verification(monkeypatch, scheme, {"boc-1": settlement})
-
-    response = scheme.settle(_make_payload("boc-1", amount="100"), _make_requirements(amount="100"))
-
-    assert response.success is True
-    assert response.transaction == PAYER_TX_HASH_1
-    assert response.error_reason is None
-
-
-def test_settle_fails_when_finalized_trace_has_no_matching_source_wallet_transaction(
-    monkeypatch,
-):
-    settlement = _make_settlement(
-        settlement_hash="settlement-1", source_wallet=SOURCE_WALLET_1, amount=100
-    )
-    signer = MockSigner(
-        _make_finalized_trace(settlement=settlement, include_source_wallet_tx=False)
-    )
-    scheme = ExactTvmScheme(signer, batch_flush_interval_seconds=0.0, batch_max_size=1)
-    _patch_scheme_verification(monkeypatch, scheme, {"boc-1": settlement})
-
-    response = scheme.settle(_make_payload("boc-1", amount="100"), _make_requirements(amount="100"))
-
-    assert response.success is False
-    assert response.transaction == ""
-    assert response.error_reason == "transaction_failed"
-    assert "source jetton wallet transaction" in (response.error_message or "")
-
-
-def test_settle_batch_marks_each_settlement_individually(monkeypatch):
-    settlement_1 = _make_settlement(
-        settlement_hash="settlement-1", source_wallet=SOURCE_WALLET_1, amount=100
-    )
-    settlement_2 = _make_settlement(
-        settlement_hash="settlement-2", source_wallet=SOURCE_WALLET_2, amount=200
-    )
-    finalized_trace = _make_finalized_trace(settlement=settlement_1, payer_tx_hash=PAYER_TX_HASH_1)
-    finalized_trace["transactions"]["payer-wallet-tx-2"] = {
-        **finalized_trace["transactions"]["payer-wallet-tx"],
-        "hash": PAYER_TX_HASH_2,
-        "out_msgs": [
-            {
-                **finalized_trace["transactions"]["payer-wallet-tx"]["out_msgs"][0],
-                "destination": settlement_2.transfer.source_wallet,
-                "message_content": {
-                    "hash": _hash_string(settlement_2.transfer.body_hash or b""),
-                },
-            }
-        ],
-        "in_msg": {
-            "message_content": {
-                "hash": _hash_string(settlement_2.body.hash),
-            },
-        },
+    facilitator = ExactTvmFacilitatorScheme(signer, SettlementCache())
+    return {
+        "facilitator": facilitator,
+        "signer": signer,
+        "settlement": settlement,
+        "batcher": lambda: batchers[-1],
     }
-    finalized_trace["transactions"]["source-wallet-tx-2"] = {
-        "hash": "source-wallet-tx-2",
-        "account": settlement_2.transfer.source_wallet,
-        "description": {
-            "aborted": False,
-            "action": {"success": True},
-            "compute_ph": {"success": True, "skipped": False},
-        },
-        "in_msg": {
-            "hash": _hash_string(b"source-wallet-tx-2-in"),
-            "hash_norm": _hash_string(b"source-wallet-tx-2-in"),
-        },
-    }
-    finalized_trace["transactions"]["payer-wallet-tx-2"]["out_msgs"][0]["hash"] = _hash_string(
-        b"source-wallet-tx-2-in"
-    )
-    finalized_trace["transactions"]["payer-wallet-tx-2"]["out_msgs"][0]["hash_norm"] = _hash_string(
-        b"source-wallet-tx-2-in"
-    )
-    signer = MockSigner(finalized_trace)
-    scheme = ExactTvmScheme(signer, batch_flush_interval_seconds=1.0, batch_max_size=2)
-    _patch_scheme_verification(
-        monkeypatch,
-        scheme,
-        {
-            "boc-1": settlement_1,
-            "boc-2": settlement_2,
-        },
-    )
 
-    results: dict[str, object] = {}
 
-    def settle(name: str, settlement_boc: str, amount: str) -> None:
-        results[name] = scheme.settle(
-            _make_payload(settlement_boc, amount=amount),
-            _make_requirements(amount=amount),
+class TestExactTvmFacilitatorSchemeConstructor:
+    def test_should_create_instance_with_correct_scheme(self, facilitator_env):
+        facilitator = facilitator_env["facilitator"]
+
+        assert facilitator.scheme == "exact"
+        assert facilitator.caip_family == "tvm:*"
+
+    def test_should_return_supported_extra_and_signers(self, facilitator_env):
+        facilitator = facilitator_env["facilitator"]
+
+        assert facilitator.get_extra(TVM_TESTNET) == {"areFeesSponsored": True}
+        assert facilitator.get_extra("tvm:123") is None
+        assert facilitator.get_signers(TVM_TESTNET) == [FACILITATOR]
+
+
+class TestVerify:
+    def test_should_reject_wrong_scheme(self, facilitator_env):
+        facilitator = facilitator_env["facilitator"]
+
+        result = facilitator.verify(
+            _make_payload(accepted_scheme="wrong"),
+            _make_requirements(),
         )
 
-    thread_1 = threading.Thread(target=settle, args=("first", "boc-1", "100"))
-    thread_2 = threading.Thread(target=settle, args=("second", "boc-2", "200"))
-    thread_1.start()
-    thread_2.start()
-    thread_1.join(timeout=2.0)
-    thread_2.join(timeout=2.0)
+        assert result.is_valid is False
+        assert result.invalid_reason == ERR_UNSUPPORTED_SCHEME
 
-    assert thread_1.is_alive() is False
-    assert thread_2.is_alive() is False
+    def test_should_reject_unsupported_network(self, facilitator_env):
+        facilitator = facilitator_env["facilitator"]
 
-    first = results["first"]
-    second = results["second"]
-    assert first.success is True
-    assert first.transaction == PAYER_TX_HASH_1
-    assert second.success is True
-    assert second.transaction == PAYER_TX_HASH_2
-    assert second.error_reason is None
+        result = facilitator.verify(
+            _make_payload(accepted_network="tvm:123"),
+            _make_requirements(network="tvm:123"),
+        )
 
+        assert result.is_valid is False
+        assert result.invalid_reason == ERR_UNSUPPORTED_NETWORK
 
-def test_settle_batch_matches_exact_settlement_transaction_chain(monkeypatch):
-    settlement_1 = _make_settlement(
-        settlement_hash="settlement-1", source_wallet=SOURCE_WALLET_1, amount=100
-    )
-    settlement_2 = _make_settlement(
-        settlement_hash="settlement-2", source_wallet=SOURCE_WALLET_1, amount=100
-    )
-    signer = MockSigner(
-        _make_finalized_trace(settlement=settlement_1, source_wallet_tx_hash="source-wallet-tx-1")
-    )
-    scheme = ExactTvmScheme(signer, batch_flush_interval_seconds=1.0, batch_max_size=2)
-    _patch_scheme_verification(
-        monkeypatch,
-        scheme,
-        {
-            "boc-1": settlement_1,
-            "boc-2": settlement_2,
-        },
-    )
+    def test_should_reject_network_mismatch(self, facilitator_env):
+        facilitator = facilitator_env["facilitator"]
 
-    results: dict[str, object] = {}
+        result = facilitator.verify(
+            _make_payload(accepted_network="tvm:-239"),
+            _make_requirements(network=TVM_TESTNET),
+        )
 
-    def settle(name: str, settlement_boc: str) -> None:
-        results[name] = scheme.settle(
-            _make_payload(settlement_boc, amount="100"),
+        assert result.is_valid is False
+        assert result.invalid_reason == ERR_NETWORK_MISMATCH
+
+    def test_should_reject_amount_mismatch(self, facilitator_env):
+        facilitator = facilitator_env["facilitator"]
+
+        result = facilitator.verify(
+            _make_payload(accepted_amount="101"),
             _make_requirements(amount="100"),
         )
 
-    thread_1 = threading.Thread(target=settle, args=("first", "boc-1"))
-    thread_2 = threading.Thread(target=settle, args=("second", "boc-2"))
-    thread_1.start()
-    thread_2.start()
-    thread_1.join(timeout=2.0)
-    thread_2.join(timeout=2.0)
+        assert result.is_valid is False
+        assert result.invalid_reason == ERR_INVALID_AMOUNT
 
-    assert thread_1.is_alive() is False
-    assert thread_2.is_alive() is False
+    def test_should_reject_asset_mismatch(self, facilitator_env):
+        facilitator = facilitator_env["facilitator"]
 
-    first = results["first"]
-    second = results["second"]
-    assert first.success is True
-    assert first.transaction == PAYER_TX_HASH_1
-    assert second.success is False
-    assert second.transaction == ""
-    assert second.error_reason == "transaction_failed"
-    assert "payer wallet transaction" in (second.error_message or "")
-
-
-def test_verify_accepts_exact_dynamic_inner_value(monkeypatch):
-    settlement = _make_settlement(
-        settlement_hash="settlement-dynamic",
-        source_wallet=SOURCE_WALLET_1,
-        amount=100,
-        attached_ton_amount=7_500_000,
-    )
-    signer = _VerificationSigner(_make_emulation_trace(settlement=settlement))
-    scheme = ExactTvmScheme(signer, batch_flush_interval_seconds=0.0, batch_max_size=1)
-    _patch_live_verification_dependencies(monkeypatch, settlement)
-
-    response = scheme.verify(_make_payload("boc-1", amount="100"), _make_requirements(amount="100"))
-
-    assert response.is_valid is True
-
-
-def test_verify_uses_signed_inner_value_when_computing_outer_amount(monkeypatch):
-    settlement = _make_settlement(
-        settlement_hash="settlement-tolerance",
-        source_wallet=SOURCE_WALLET_1,
-        amount=100,
-        attached_ton_amount=8_500_000,
-    )
-    signer = _VerificationSigner(_make_emulation_trace(settlement=settlement))
-    scheme = ExactTvmScheme(signer, batch_flush_interval_seconds=0.0, batch_max_size=1)
-    _patch_live_verification_dependencies(monkeypatch, settlement)
-
-    response = scheme.verify(_make_payload("boc-1", amount="100"), _make_requirements(amount="100"))
-
-    assert response.is_valid is True
-
-
-def test_verify_does_not_reject_lower_signed_inner_value_when_emulation_succeeds(monkeypatch):
-    settlement = _make_settlement(
-        settlement_hash="settlement-underfunded",
-        source_wallet=SOURCE_WALLET_1,
-        amount=100,
-        attached_ton_amount=7_499_999,
-    )
-    signer = _VerificationSigner(_make_emulation_trace(settlement=settlement))
-    scheme = ExactTvmScheme(signer, batch_flush_interval_seconds=0.0, batch_max_size=1)
-    _patch_live_verification_dependencies(monkeypatch, settlement)
-
-    response = scheme.verify(_make_payload("boc-1", amount="100"), _make_requirements(amount="100"))
-
-    assert response.is_valid is True
-
-
-def test_verify_does_not_reject_higher_signed_inner_value_when_emulation_succeeds(monkeypatch):
-    settlement = _make_settlement(
-        settlement_hash="settlement-overpay",
-        source_wallet=SOURCE_WALLET_1,
-        amount=100,
-        attached_ton_amount=8_500_001,
-    )
-    signer = _VerificationSigner(_make_emulation_trace(settlement=settlement))
-    scheme = ExactTvmScheme(signer, batch_flush_interval_seconds=0.0, batch_max_size=1)
-    _patch_live_verification_dependencies(monkeypatch, settlement)
-
-    response = scheme.verify(_make_payload("boc-1", amount="100"), _make_requirements(amount="100"))
-
-    assert response.is_valid is True
-
-
-def test_settle_recomputes_relay_request_on_each_call(monkeypatch):
-    settlement = _make_settlement(
-        settlement_hash="settlement-reverify",
-        source_wallet=SOURCE_WALLET_1,
-        amount=100,
-    )
-    signer = MockSigner(_make_finalized_trace(settlement=settlement))
-    scheme = ExactTvmScheme(signer, batch_flush_interval_seconds=0.0, batch_max_size=1)
-    monkeypatch.setattr(
-        "x402.mechanisms.tvm.exact.facilitator.parse_exact_tvm_payload",
-        lambda settlement_boc: settlement,
-    )
-
-    verify_calls = {"count": 0}
-
-    def _fake_verify(payload, requirements, tvm_payload, parsed_settlement):
-        verify_calls["count"] += 1
-        return (
-            VerifyResponse(is_valid=True, payer=parsed_settlement.payer),
-            TvmRelayRequest(
-                destination=parsed_settlement.payer,
-                body=None,  # type: ignore[arg-type]
-                state_init=None,
-                relay_amount=222_222_222,
-            ),
+        result = facilitator.verify(
+            _make_payload(payload_asset="0:" + "9" * 64),
+            _make_requirements(),
         )
 
-    monkeypatch.setattr(scheme, "_verify", _fake_verify)
-    assert scheme.verify(
-        _make_payload("boc-1", amount="100"), _make_requirements(amount="100")
-    ).is_valid
+        assert result.is_valid is False
+        assert result.invalid_reason == ERR_INVALID_ASSET
 
-    settle_response = scheme.settle(
-        _make_payload("boc-1", amount="100"),
-        _make_requirements(amount="100"),
-    )
+    def test_should_reject_payee_mismatch(self, facilitator_env):
+        facilitator = facilitator_env["facilitator"]
 
-    assert settle_response.success is True
-    assert verify_calls["count"] == 2
+        result = facilitator.verify(
+            _make_payload(accepted_pay_to="0:" + "8" * 64),
+            _make_requirements(),
+        )
+
+        assert result.is_valid is False
+        assert result.invalid_reason == ERR_INVALID_RECIPIENT
+
+    def test_should_reject_forward_amount_mismatch(self, facilitator_env):
+        facilitator = facilitator_env["facilitator"]
+
+        result = facilitator.verify(
+            _make_payload(accepted_extra={"forwardTonAmount": "1"}),
+            _make_requirements(),
+        )
+
+        assert result.is_valid is False
+        assert result.invalid_reason == ERR_INVALID_JETTON_TRANSFER
+
+    def test_should_reject_expired_settlement(self, facilitator_env, monkeypatch):
+        facilitator = facilitator_env["facilitator"]
+        settlement = facilitator_env["settlement"]
+        monkeypatch.setattr(
+            facilitator_module,
+            "parse_exact_tvm_payload",
+            lambda boc: _make_settlement(valid_until=int(time.time()) - 1, seqno=settlement.seqno),
+        )
+
+        result = facilitator.verify(_make_payload(), _make_requirements())
+
+        assert result.is_valid is False
+        assert result.invalid_reason == ERR_INVALID_UNTIL_EXPIRED
+
+    def test_should_reject_valid_until_beyond_timeout(self, facilitator_env, monkeypatch):
+        facilitator = facilitator_env["facilitator"]
+        monkeypatch.setattr(
+            facilitator_module,
+            "parse_exact_tvm_payload",
+            lambda boc: _make_settlement(valid_until=int(time.time()) + 600),
+        )
+
+        result = facilitator.verify(_make_payload(), _make_requirements(max_timeout_seconds=300))
+
+        assert result.is_valid is False
+        assert result.invalid_reason == ERR_VALID_UNTIL_TOO_FAR
+
+    def test_should_reject_invalid_signature(self, facilitator_env, monkeypatch):
+        facilitator = facilitator_env["facilitator"]
+        monkeypatch.setattr(facilitator_module, "verify_w5_signature", lambda *args: False)
+
+        result = facilitator.verify(_make_payload(), _make_requirements())
+
+        assert result.is_valid is False
+        assert result.invalid_reason == ERR_INVALID_SIGNATURE
+
+    def test_should_return_valid_response_for_matching_payload(self, facilitator_env):
+        facilitator = facilitator_env["facilitator"]
+
+        result = facilitator.verify(_make_payload(), _make_requirements())
+
+        assert result.is_valid is True
+        assert result.payer == PAYER
 
 
-def test_settle_batch_uses_cached_exact_outer_values(monkeypatch):
-    settlement_1 = _make_settlement(
-        settlement_hash="settlement-exact-1",
-        source_wallet=SOURCE_WALLET_1,
-        amount=100,
-    )
-    settlement_2 = _make_settlement(
-        settlement_hash="settlement-exact-2",
-        source_wallet=SOURCE_WALLET_2,
-        amount=200,
-    )
-    finalized_trace = _make_finalized_trace(settlement=settlement_1, payer_tx_hash=PAYER_TX_HASH_1)
-    finalized_trace["transactions"]["payer-wallet-tx-2"] = {
-        **finalized_trace["transactions"]["payer-wallet-tx"],
-        "hash": PAYER_TX_HASH_2,
-        "out_msgs": [
-            {
-                **finalized_trace["transactions"]["payer-wallet-tx"]["out_msgs"][0],
-                "destination": settlement_2.transfer.source_wallet,
-                "message_content": {
-                    "hash": _hash_string(settlement_2.transfer.body_hash or b""),
-                },
-            }
-        ],
-        "in_msg": {
-            "message_content": {
-                "hash": _hash_string(settlement_2.body.hash),
+class TestSettle:
+    def test_should_fail_settlement_if_verification_fails(self, facilitator_env):
+        facilitator = facilitator_env["facilitator"]
+
+        result = facilitator.settle(
+            _make_payload(accepted_scheme="wrong"),
+            _make_requirements(),
+        )
+
+        assert result.success is False
+        assert result.error_reason == ERR_UNSUPPORTED_SCHEME
+        assert result.transaction == ""
+        assert result.network == TVM_TESTNET
+
+    def test_should_reject_duplicate_settlement(self, facilitator_env):
+        facilitator = facilitator_env["facilitator"]
+
+        first = facilitator.settle(_make_payload(), _make_requirements())
+        second = facilitator.settle(_make_payload(), _make_requirements())
+
+        assert first.success is True
+        assert second.success is False
+        assert second.error_reason == ERR_DUPLICATE_SETTLEMENT
+        assert second.payer == PAYER
+
+    def test_should_return_successful_settlement_response(self, facilitator_env):
+        facilitator = facilitator_env["facilitator"]
+        batcher = facilitator_env["batcher"]()
+
+        result = facilitator.settle(_make_payload(), _make_requirements())
+
+        assert result.success is True
+        assert result.transaction == "trace-tx-hash"
+        assert result.payer == PAYER
+        assert result.network == TVM_TESTNET
+        assert len(batcher.enqueued) == 1
+        queued = batcher.enqueued[0]
+        assert queued.network == TVM_TESTNET
+        assert queued.settlement_hash == "settlement-hash-1"
+        assert queued.relay_request.destination == PAYER
+        assert queued.relay_request.relay_amount == (
+            500_000 + 10_000 + 20_000 + 30_000 + DEFAULT_TVM_OUTER_GAS_BUFFER
+        )
+
+    def test_should_convert_batcher_exceptions_into_transaction_failed(self, facilitator_env):
+        facilitator = facilitator_env["facilitator"]
+        batcher = facilitator_env["batcher"]()
+        batcher.error = RuntimeError("boom")
+
+        result = facilitator.settle(_make_payload(), _make_requirements())
+
+        assert result.success is False
+        assert result.error_reason == ERR_TRANSACTION_FAILED
+        assert result.error_message == "boom"
+
+    def test_should_map_unexpected_verification_exception_to_simulation_failed(
+        self, facilitator_env, monkeypatch
+    ):
+        facilitator = facilitator_env["facilitator"]
+        monkeypatch.setattr(
+            facilitator_module,
+            "parse_exact_tvm_payload",
+            lambda boc: (_ for _ in ()).throw(RuntimeError("decode crashed")),
+        )
+
+        result = facilitator.settle(_make_payload(), _make_requirements())
+
+        assert result.success is False
+        assert result.error_reason == ERR_SIMULATION_FAILED
+        assert result.error_message == "decode crashed"
+
+
+def _make_trace(
+    *,
+    include_payer_tx: bool = True,
+    payer_tx_success: bool = True,
+    include_matching_payer_out_msg: bool = True,
+    include_source_wallet_tx: bool = True,
+    payer_hash: str | None = "payer-tx-hash",
+):
+    settlement = _make_settlement()
+    transactions: dict[str, object] = {}
+    if include_payer_tx:
+        transactions["payer"] = {
+            "hash": payer_hash,
+            "account": PAYER,
+            "description": {
+                "aborted": not payer_tx_success,
+                "compute_ph": {"success": payer_tx_success, "skipped": False},
+                "action": {"success": payer_tx_success},
             },
-        },
-    }
-    finalized_trace["transactions"]["source-wallet-tx-2"] = {
-        "hash": "source-wallet-tx-2",
-        "account": settlement_2.transfer.source_wallet,
-        "description": {
-            "aborted": False,
-            "action": {"success": True},
-            "compute_ph": {"success": True, "skipped": False},
-        },
-        "in_msg": {
-            "hash": _hash_string(b"source-wallet-tx-2-in"),
-            "hash_norm": _hash_string(b"source-wallet-tx-2-in"),
-        },
-    }
-    finalized_trace["transactions"]["payer-wallet-tx-2"]["out_msgs"][0]["hash"] = _hash_string(
-        b"source-wallet-tx-2-in"
-    )
-    finalized_trace["transactions"]["payer-wallet-tx-2"]["out_msgs"][0]["hash_norm"] = _hash_string(
-        b"source-wallet-tx-2-in"
-    )
-    signer = MockSigner(finalized_trace)
-    scheme = ExactTvmScheme(signer, batch_flush_interval_seconds=1.0, batch_max_size=2)
-    monkeypatch.setattr(
-        "x402.mechanisms.tvm.exact.facilitator.parse_exact_tvm_payload",
-        lambda settlement_boc: {"boc-1": settlement_1, "boc-2": settlement_2}[settlement_boc],
-    )
+            "in_msg": {
+                "message_content": {"hash": body_hash_to_base64(settlement.body.hash)},
+            },
+            "out_msgs": (
+                [
+                    {
+                        "hash": "payer-out-hash",
+                        "destination": SOURCE_WALLET,
+                        "message_content": {
+                            "hash": body_hash_to_base64(settlement.transfer.body_hash or b""),
+                        },
+                    }
+                ]
+                if include_matching_payer_out_msg
+                else []
+            ),
+        }
+    if include_source_wallet_tx:
+        transactions["source"] = {
+            "hash": "source-tx-hash",
+            "account": SOURCE_WALLET,
+            "description": {
+                "aborted": False,
+                "compute_ph": {"success": True, "skipped": False},
+                "action": {"success": True},
+            },
+            "in_msg": {
+                "hash": "payer-out-hash",
+            },
+        }
+    return settlement, {"transactions": transactions}
 
-    relay_requests = {
-        "boc-1": TvmRelayRequest(
-            destination=settlement_1.payer,
-            body=None,  # type: ignore[arg-type]
-            state_init=None,
-            relay_amount=111_111_111,
-        ),
-        "boc-2": TvmRelayRequest(
-            destination=settlement_2.payer,
-            body=None,  # type: ignore[arg-type]
-            state_init=None,
-            relay_amount=222_222_222,
-        ),
-    }
 
-    monkeypatch.setattr(
-        scheme,
-        "_verify",
-        lambda payload, requirements, tvm_payload, settlement: (
-            VerifyResponse(is_valid=True, payer=settlement.payer),
-            relay_requests[tvm_payload.settlement_boc],
-        ),
-    )
+class TestVerifyFinalizedTraceSettlement:
+    def test_should_fail_when_trace_has_no_matching_payer_wallet_transaction(self):
+        settlement, trace = _make_trace(include_payer_tx=False)
 
-    results: dict[str, object] = {}
+        with pytest.raises(ValueError, match="expected payer wallet transaction"):
+            ExactTvmFacilitatorScheme._verify_finalized_trace_settlement(
+                trace,
+                settlement=settlement,
+            )
 
-    def settle(name: str, settlement_boc: str, amount: str) -> None:
-        results[name] = scheme.settle(
-            _make_payload(settlement_boc, amount=amount),
-            _make_requirements(amount=amount),
+    def test_should_ignore_failed_payer_wallet_transactions(self):
+        settlement, trace = _make_trace(payer_tx_success=False)
+
+        with pytest.raises(ValueError, match="expected payer wallet transaction"):
+            ExactTvmFacilitatorScheme._verify_finalized_trace_settlement(
+                trace,
+                settlement=settlement,
+            )
+
+    def test_should_fail_when_payer_wallet_transaction_has_no_matching_out_message(self):
+        settlement, trace = _make_trace(include_matching_payer_out_msg=False)
+
+        with pytest.raises(ValueError, match="missing out message hash"):
+            ExactTvmFacilitatorScheme._verify_finalized_trace_settlement(
+                trace,
+                settlement=settlement,
+            )
+
+    def test_should_fail_when_trace_has_no_matching_source_wallet_transaction(self):
+        settlement, trace = _make_trace(include_source_wallet_tx=False)
+
+        with pytest.raises(ValueError, match="expected source jetton wallet transaction"):
+            ExactTvmFacilitatorScheme._verify_finalized_trace_settlement(
+                trace,
+                settlement=settlement,
+            )
+
+    def test_should_fail_when_payer_wallet_transaction_has_no_hash(self):
+        settlement, trace = _make_trace(payer_hash="")
+
+        with pytest.raises(ValueError, match="missing transaction hash"):
+            ExactTvmFacilitatorScheme._verify_finalized_trace_settlement(
+                trace,
+                settlement=settlement,
+            )
+
+    def test_should_return_payer_transaction_hash_for_valid_trace(self):
+        settlement, trace = _make_trace()
+
+        result = ExactTvmFacilitatorScheme._verify_finalized_trace_settlement(
+            trace,
+            settlement=settlement,
         )
 
-    thread_1 = threading.Thread(target=settle, args=("first", "boc-1", "100"))
-    thread_2 = threading.Thread(target=settle, args=("second", "boc-2", "200"))
-    thread_1.start()
-    thread_2.start()
-    thread_1.join(timeout=2.0)
-    thread_2.join(timeout=2.0)
+        assert result == "payer-tx-hash"
 
-    assert results["first"].success is True
-    assert results["second"].success is True
-    assert sorted(request.relay_amount for request in signer.sent_batches[0]) == [
-        111_111_111,
-        222_222_222,
-    ]
+    def test_should_return_payer_transaction_object_when_requested(self):
+        settlement, trace = _make_trace()
 
+        result = ExactTvmFacilitatorScheme._verify_finalized_trace_settlement(
+            trace,
+            settlement=settlement,
+            return_transaction=True,
+        )
 
-def test_settle_returns_structured_error_for_invalid_payload(monkeypatch):
-    scheme = ExactTvmScheme(MockSigner({}), batch_flush_interval_seconds=0.0, batch_max_size=1)
-    monkeypatch.setattr(
-        "x402.mechanisms.tvm.exact.facilitator.parse_exact_tvm_payload",
-        lambda settlement_boc: (_ for _ in ()).throw(ValueError(ERR_INVALID_SETTLEMENT_BOC)),
-    )
-
-    response = scheme.settle(
-        _make_payload("bad-boc", amount="100"), _make_requirements(amount="100")
-    )
-
-    assert response.success is False
-    assert response.error_reason == ERR_INVALID_SETTLEMENT_BOC
-    assert response.transaction == ""
-    assert response.payer == ""
-
-
-def test_verify_rejects_internal_signed_message_with_non_fee_separate_mode():
-    scheme = ExactTvmScheme(MockSigner({}), batch_flush_interval_seconds=0.0, batch_max_size=1)
-
-    response = scheme.verify(
-        _make_payload(_make_real_settlement_boc_with_mode(0), amount="100"),
-        _make_requirements(amount="100"),
-    )
-
-    assert response.is_valid is False
-    assert response.invalid_reason == ERR_INVALID_W5_ACTIONS
-
-
-def test_verify_rejects_forward_ton_amount_above_one(monkeypatch):
-    settlement = replace(
-        _make_settlement(settlement_hash="settlement-1", source_wallet=SOURCE_WALLET_1, amount=100),
-        transfer=replace(
-            _make_settlement(
-                settlement_hash="settlement-1",
-                source_wallet=SOURCE_WALLET_1,
-                amount=100,
-            ).transfer,
-            forward_ton_amount=2,
-        ),
-    )
-    scheme = ExactTvmScheme(MockSigner({}), batch_flush_interval_seconds=0.0, batch_max_size=1)
-    monkeypatch.setattr(
-        "x402.mechanisms.tvm.exact.facilitator.parse_exact_tvm_payload",
-        lambda settlement_boc: settlement,
-    )
-
-    response = scheme.verify(_make_payload("boc-1", amount="100"), _make_requirements(amount="100"))
-
-    assert response.is_valid is False
-    assert response.invalid_reason == ERR_INVALID_JETTON_TRANSFER
-
-
-def test_verify_rejects_mismatched_response_destination(monkeypatch):
-    settlement = replace(
-        _make_settlement(settlement_hash="settlement-1", source_wallet=SOURCE_WALLET_1, amount=100),
-        transfer=replace(
-            _make_settlement(
-                settlement_hash="settlement-1",
-                source_wallet=SOURCE_WALLET_1,
-                amount=100,
-            ).transfer,
-            response_destination=PAYER,
-        ),
-    )
-    scheme = ExactTvmScheme(MockSigner({}), batch_flush_interval_seconds=0.0, batch_max_size=1)
-    monkeypatch.setattr(
-        "x402.mechanisms.tvm.exact.facilitator.parse_exact_tvm_payload",
-        lambda settlement_boc: settlement,
-    )
-
-    response = scheme.verify(_make_payload("boc-1", amount="100"), _make_requirements(amount="100"))
-
-    assert response.is_valid is False
-    assert response.invalid_reason == ERR_INVALID_JETTON_TRANSFER
-
-
-def test_verify_accepts_matching_response_destination(monkeypatch):
-    settlement = replace(
-        _make_settlement(settlement_hash="settlement-1", source_wallet=SOURCE_WALLET_1, amount=100),
-        transfer=replace(
-            _make_settlement(
-                settlement_hash="settlement-1",
-                source_wallet=SOURCE_WALLET_1,
-                amount=100,
-            ).transfer,
-            response_destination=RESPONSE_DESTINATION,
-        ),
-    )
-    signer = _VerificationSigner(_make_emulation_trace(settlement=settlement))
-    scheme = ExactTvmScheme(signer, batch_flush_interval_seconds=0.0, batch_max_size=1)
-    _patch_live_verification_dependencies(monkeypatch, settlement)
-
-    response = scheme.verify(
-        _make_payload("boc-1", amount="100", response_destination=RESPONSE_DESTINATION),
-        _make_requirements(amount="100", response_destination=RESPONSE_DESTINATION),
-    )
-
-    assert response.is_valid is True
-
-
-def test_verify_rejects_mismatched_payload_response_destination(monkeypatch):
-    settlement = replace(
-        _make_settlement(settlement_hash="settlement-1", source_wallet=SOURCE_WALLET_1, amount=100),
-        transfer=replace(
-            _make_settlement(
-                settlement_hash="settlement-1",
-                source_wallet=SOURCE_WALLET_1,
-                amount=100,
-            ).transfer,
-            response_destination=RESPONSE_DESTINATION,
-        ),
-    )
-    scheme = ExactTvmScheme(MockSigner({}), batch_flush_interval_seconds=0.0, batch_max_size=1)
-    monkeypatch.setattr(
-        "x402.mechanisms.tvm.exact.facilitator.parse_exact_tvm_payload",
-        lambda settlement_boc: settlement,
-    )
-
-    response = scheme.verify(
-        _make_payload("boc-1", amount="100", response_destination=RESPONSE_DESTINATION),
-        _make_requirements(amount="100"),
-    )
-
-    assert response.is_valid is False
-    assert response.invalid_reason == ERR_INVALID_JETTON_TRANSFER
-
-
-def test_verify_rejects_mismatched_forward_ton_amount(monkeypatch):
-    settlement = replace(
-        _make_settlement(settlement_hash="settlement-1", source_wallet=SOURCE_WALLET_1, amount=100),
-        transfer=replace(
-            _make_settlement(
-                settlement_hash="settlement-1",
-                source_wallet=SOURCE_WALLET_1,
-                amount=100,
-            ).transfer,
-            forward_ton_amount=1,
-        ),
-    )
-    scheme = ExactTvmScheme(MockSigner({}), batch_flush_interval_seconds=0.0, batch_max_size=1)
-    monkeypatch.setattr(
-        "x402.mechanisms.tvm.exact.facilitator.parse_exact_tvm_payload",
-        lambda settlement_boc: settlement,
-    )
-
-    response = scheme.verify(_make_payload("boc-1", amount="100"), _make_requirements(amount="100"))
-
-    assert response.is_valid is False
-    assert response.invalid_reason == ERR_INVALID_JETTON_TRANSFER
-
-
-def test_verify_rejects_noncanonical_source_wallet(monkeypatch):
-    settlement = replace(
-        _make_settlement(settlement_hash="settlement-1", source_wallet=SOURCE_WALLET_2, amount=100),
-        valid_until=int(time.time()) + 60,
-    )
-    scheme = ExactTvmScheme(MockSigner({}), batch_flush_interval_seconds=0.0, batch_max_size=1)
-    scheme._signer = type(
-        "CanonicalMismatchSigner",
-        (),
-        {
-            "get_addresses": lambda self: ["0:" + "f" * 64],
-            "get_account_state": lambda self, address, network: TvmAccountState(
-                address=address,
-                balance=0,
-                is_active=True,
-                is_uninitialized=False,
-                state_init=None,
-            ),
-            "get_jetton_wallet": lambda self, asset, owner, network: SOURCE_WALLET_1,
-        },
-    )()
-    monkeypatch.setattr(
-        "x402.mechanisms.tvm.exact.facilitator.parse_exact_tvm_payload",
-        lambda settlement_boc: settlement,
-    )
-    monkeypatch.setattr(
-        "x402.mechanisms.tvm.exact.facilitator.parse_active_w5_account_state",
-        lambda account: W5InitData(
-            signature_allowed=True,
-            seqno=settlement.seqno,
-            wallet_id=settlement.wallet_id,
-            public_key=b"\x01" * 32,
-            extensions_dict=None,
-        ),
-    )
-    monkeypatch.setattr(
-        "x402.mechanisms.tvm.exact.facilitator.verify_w5_signature",
-        lambda public_key, signed_slice_hash, signature: True,
-    )
-
-    response = scheme.verify(_make_payload("boc-1", amount="100"), _make_requirements(amount="100"))
-
-    assert response.is_valid is False
-    assert response.invalid_reason == ERR_INVALID_JETTON_TRANSFER
+        assert result["hash"] == "payer-tx-hash"

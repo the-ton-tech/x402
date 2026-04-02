@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from decimal import Decimal
-import re
 
 from ....schemas import AssetAmount, Network, PaymentRequirements, Price, SupportedKind
 from ..codecs.common import (
@@ -89,6 +89,7 @@ class ExactTvmScheme:
         if not requirements.asset:
             requirements.asset = self._get_default_asset(str(requirements.network))
         requirements.asset = normalize_address(requirements.asset)
+        requirements.pay_to = normalize_address(requirements.pay_to)
 
         if "." in requirements.amount:
             requirements.amount = str(

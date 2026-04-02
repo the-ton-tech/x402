@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import base64
+import logging
 import time
 from typing import Any
 
+from .codecs.common import address_to_stack_item, normalize_address
 from .constants import (
     DEFAULT_TONCENTER_TIMEOUT_SECONDS,
     TONCENTER_MAINNET_BASE_URL,
@@ -13,7 +15,6 @@ from .constants import (
     TVM_MAINNET,
     TVM_TESTNET,
 )
-from .codecs.common import address_to_stack_item, normalize_address
 from .types import TvmAccountState, TvmJettonWalletData
 
 try:
@@ -24,6 +25,10 @@ except ImportError as e:
     raise ImportError(
         "TVM mechanism requires pytoniq packages and httpx. Install with: pip install x402[tvm,httpx]"
     ) from e
+
+logger = logging.getLogger(__name__)
+
+_MAX_LOGGED_RESPONSE_BODY_LENGTH = 512
 
 
 class ToncenterV3Client:
@@ -99,14 +104,15 @@ class ToncenterV3Client:
             "/api/v3/message",
             json={"boc": base64.b64encode(boc).decode("utf-8")},
         )
-        return str(response.get("message_hash_norm") or response.get("message_hash"))
+        return str(response.get("message_hash_norm") or response["message_hash"])
 
-    def emulate_trace(self, boc: bytes) -> dict[str, Any]:
+    def emulate_trace(self, boc: bytes, *, ignore_chksig: bool = False) -> dict[str, Any]:
         response = self._request(
             "POST",
             "/api/emulate/v1/emulateTrace",
             json={
                 "boc": base64.b64encode(boc).decode("utf-8"),
+                "ignore_chksig": ignore_chksig,
                 "with_actions": True,
             },
         )
@@ -184,13 +190,32 @@ class ToncenterV3Client:
                 return data
             except httpx.HTTPStatusError as exc:
                 last_error = exc
-                if (
-                    exc.response.status_code not in {429, 500, 502, 503, 504}
-                    or attempt == attempts - 1
-                ):
+                retryable = exc.response.status_code in {429, 500, 502, 503, 504}
+                logger.warning(
+                    "Toncenter request failed: method=%s path=%s url=%s status=%s "
+                    "attempt=%s/%s retryable=%s body=%r",
+                    method,
+                    path,
+                    str(exc.request.url),
+                    exc.response.status_code,
+                    attempt + 1,
+                    attempts,
+                    retryable,
+                    _truncate_response_body(exc.response.text),
+                )
+                if not retryable or attempt == attempts - 1:
                     raise
                 retry_after = exc.response.headers.get("Retry-After")
                 if retry_after:
+                    logger.info(
+                        "Toncenter request backing off per Retry-After: method=%s path=%s "
+                        "retry_after=%s attempt=%s/%s",
+                        method,
+                        path,
+                        retry_after,
+                        attempt + 1,
+                        attempts,
+                    )
                     try:
                         time.sleep(float(retry_after))
                         continue
@@ -198,6 +223,14 @@ class ToncenterV3Client:
                         pass
             except httpx.RequestError as exc:
                 last_error = exc
+                logger.warning(
+                    "Toncenter request transport error: method=%s path=%s attempt=%s/%s error=%r",
+                    method,
+                    path,
+                    attempt + 1,
+                    attempts,
+                    exc,
+                )
                 if attempt == attempts - 1:
                     raise
             time.sleep(backoff_seconds * (attempt + 1))
@@ -213,3 +246,9 @@ def _default_base_url(network: str) -> str:
     if network == TVM_TESTNET:
         return TONCENTER_TESTNET_BASE_URL
     raise ValueError(f"Unsupported TVM network: {network}")
+
+
+def _truncate_response_body(body: str) -> str:
+    if len(body) <= _MAX_LOGGED_RESPONSE_BODY_LENGTH:
+        return body
+    return body[:_MAX_LOGGED_RESPONSE_BODY_LENGTH] + "...<truncated>"

@@ -31,7 +31,7 @@ from x402.mechanisms.tvm.exact import ExactTvmScheme
 
 config = WalletV5R1Config.from_private_key(
     TVM_TESTNET,
-    os.environ["TVM_PRIVATE_KEY"],
+    os.environ["TVM_CLIENT_PRIVATE_KEY"],
 )
 config.api_key = os.environ.get("TONCENTER_API_KEY")
 
@@ -62,7 +62,7 @@ from x402 import x402Facilitator
 from x402.mechanisms.tvm import HighloadV3Config, TVM_TESTNET, FacilitatorHighloadV3Signer
 from x402.mechanisms.tvm.exact import ExactTvmFacilitatorScheme
 
-config = HighloadV3Config.from_private_key(os.environ["TVM_PRIVATE_KEY"])
+config = HighloadV3Config.from_private_key(os.environ["TVM_FACILITATOR_PRIVATE_KEY"])
 config.api_key = os.environ.get("TONCENTER_API_KEY")
 
 signer = FacilitatorHighloadV3Signer({TVM_TESTNET: config})

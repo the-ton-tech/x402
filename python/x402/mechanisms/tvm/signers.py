@@ -262,6 +262,13 @@ class FacilitatorHighloadV3Signer:
         """Get all facilitator wallet addresses."""
         return [wallet.address for wallet in self._wallets.values()]
 
+    def get_addresses_for_network(self, network: str) -> list[str]:
+        """Get facilitator wallet addresses for one TVM network."""
+        wallet = self._wallets.get(network)
+        if wallet is None:
+            raise ValueError(f"Unsupported network: {network}")
+        return [wallet.address]
+
     def close(self) -> None:
         """Close all Toncenter clients and streaming watchers owned by this signer."""
         with self._lock:
@@ -319,7 +326,9 @@ class FacilitatorHighloadV3Signer:
 
         wallet_context = self._wallets[network]
         query_id = self._select_query_id(network, for_emulation)
-        created_at = int(time.time())
+        created_at = (
+            int(time.time()) - 5
+        )  # workaround because lite servers often lag behind the blockchain
         external_state_init = None
         forward_actions: list[Cell] = []
 

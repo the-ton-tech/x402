@@ -54,6 +54,8 @@ from ..constants import (
     SUPPORTED_NETWORKS,
     W5R1_CODE_HASH,
 )
+from ..settlement_cache import SettlementCache
+from ..signer import FacilitatorTvmSigner
 from ..trace_utils import (
     message_body_hash_matches,
     parse_trace_transactions,
@@ -62,8 +64,6 @@ from ..trace_utils import (
     trace_transaction_storage_fees,
     transaction_succeeded,
 )
-from ..settlement_cache import SettlementCache
-from ..signer import FacilitatorTvmSigner
 from ..types import ExactTvmPayload, ParsedTvmSettlement, TvmRelayRequest, W5InitData
 from .codec import parse_exact_tvm_payload
 
@@ -118,13 +118,13 @@ class _SettlementBatcher:
         settlement_cache: SettlementCache,
         *,
         flush_interval_seconds: float,
-        flush_batch_size: int,
+        batch_flush_size: int,
         confirmation_timeout_seconds: float,
     ) -> None:
         self._signer = signer
         self._settlement_cache = settlement_cache
         self._flush_interval_seconds = flush_interval_seconds
-        self._flush_batch_size = flush_batch_size
+        self._batch_flush_size = batch_flush_size
         self._max_batch_size = DEFAULT_SETTLEMENT_BATCH_MAX_SIZE
         self._confirmation_timeout_seconds = confirmation_timeout_seconds
         self._lock = threading.Lock()
@@ -155,7 +155,7 @@ class _SettlementBatcher:
                 self._deadlines[queued_settlement.network] = (
                     time.monotonic() + self._flush_interval_seconds
                 )
-            elif len(queue) >= self._flush_batch_size:
+            elif len(queue) >= self._batch_flush_size:
                 self._deadlines[queued_settlement.network] = time.monotonic()
             self._condition.notify_all()
 
@@ -181,7 +181,7 @@ class _SettlementBatcher:
                     if queue:
                         self._deadlines[network] = (
                             now
-                            if len(queue) >= self._flush_batch_size
+                            if len(queue) >= self._batch_flush_size
                             else now + self._flush_interval_seconds
                         )
                         self._condition.notify_all()
@@ -286,7 +286,7 @@ class ExactTvmScheme:
         settlement_cache: SettlementCache | None = None,
         *,
         batch_flush_interval_seconds: float = DEFAULT_SETTLEMENT_BATCH_FLUSH_INTERVAL_SECONDS,
-        batch_max_size: int = DEFAULT_SETTLEMENT_BATCH_FLUSH_SIZE,
+        batch_flush_size: int = DEFAULT_SETTLEMENT_BATCH_FLUSH_SIZE,
         streaming_confirmation_timeout_seconds: float = DEFAULT_STREAMING_CONFIRMATION_TIMEOUT_SECONDS,
     ) -> None:
         self._signer = signer
@@ -295,7 +295,7 @@ class ExactTvmScheme:
             signer,
             self._settlement_cache,
             flush_interval_seconds=batch_flush_interval_seconds,
-            flush_batch_size=batch_max_size,
+            batch_flush_size=batch_flush_size,
             confirmation_timeout_seconds=streaming_confirmation_timeout_seconds,
         )
 
@@ -307,8 +307,7 @@ class ExactTvmScheme:
 
     def get_signers(self, network: Network) -> list[str]:
         """Get facilitator wallet addresses."""
-        _ = network
-        return list(self._signer.get_addresses())
+        return self._signer.get_addresses_for_network(str(network))
 
     def verify(
         self,

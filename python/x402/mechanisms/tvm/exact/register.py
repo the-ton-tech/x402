@@ -73,8 +73,8 @@ def register_exact_tvm_facilitator(
     networks: str | list[str],
 ) -> FacilitatorT:
     """Register TVM exact payment schemes to x402Facilitator."""
-    from .facilitator import ExactTvmScheme as ExactTvmFacilitatorScheme
     from ..settlement_cache import SettlementCache
+    from .facilitator import ExactTvmScheme as ExactTvmFacilitatorScheme
 
     scheme = ExactTvmFacilitatorScheme(signer, SettlementCache())
 
