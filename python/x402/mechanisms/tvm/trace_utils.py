@@ -36,6 +36,11 @@ def body_hash_to_base64(raw_hash: bytes) -> str:
     return base64.b64encode(raw_hash).decode("ascii")
 
 
+def trace_transaction_hash_to_hex(encoded_hash: str) -> str:
+    """Convert a Toncenter transaction hash from base64 to lowercase hex."""
+    return base64.b64decode(encoded_hash).hex()
+
+
 def message_body_hash_matches(message: dict[str, object], expected_hash: bytes) -> bool:
     """Check whether a trace message matches a known TVM body hash."""
     return message.get("message_content", {}).get("hash") == body_hash_to_base64(expected_hash)

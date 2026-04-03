@@ -16,6 +16,7 @@ from x402.mechanisms.tvm.constants import (
     ERR_INVALID_W5_ACTIONS,
     ERR_INVALID_W5_MESSAGE,
     JETTON_TRANSFER_OPCODE,
+    SEND_MODE_IGNORE_ERRORS,
     SEND_MODE_PAY_FEES_SEPARATELY,
     W5_INTERNAL_SIGNED_OPCODE,
 )
@@ -124,9 +125,11 @@ class TestParseExactTvmPayload:
         with pytest.raises(ValueError, match=ERR_INVALID_SETTLEMENT_BOC):
             parse_exact_tvm_payload(_make_settlement_boc(internal=False))
 
-    def test_should_reject_non_bounceable_internal_message(self):
-        with pytest.raises(ValueError, match=ERR_INVALID_SETTLEMENT_BOC):
-            parse_exact_tvm_payload(_make_settlement_boc(bounce=False))
+    def test_should_accept_non_bounceable_settlement_wrapper(self):
+        payload = parse_exact_tvm_payload(_make_settlement_boc(bounce=False))
+
+        assert payload.payer == PAYER
+        assert payload.transfer.source_wallet == SOURCE_WALLET
 
     def test_should_reject_wrong_w5_opcode(self):
         with pytest.raises(ValueError, match=ERR_INVALID_W5_MESSAGE):
@@ -170,6 +173,25 @@ class TestParseExactTvmPayload:
             parse_exact_tvm_payload(
                 _make_settlement_boc(body=_make_signed_body(action_cell=wrong_mode_action))
             )
+
+    def test_should_accept_ignore_errors_send_mode(self):
+        out_msg = Contract.create_internal_msg(
+            src=None,
+            dest=Address(SOURCE_WALLET),
+            bounce=True,
+            value=999,
+            body=_make_transfer_body(),
+        ).serialize()
+        acceptable_action = serialize_send_msg_action(
+            out_msg,
+            SEND_MODE_PAY_FEES_SEPARATELY + SEND_MODE_IGNORE_ERRORS,
+        )
+
+        payload = parse_exact_tvm_payload(
+            _make_settlement_boc(body=_make_signed_body(action_cell=acceptable_action))
+        )
+
+        assert payload.transfer.source_wallet == SOURCE_WALLET
 
     def test_should_reject_trailing_bits_after_signature(self):
         with pytest.raises(ValueError, match=ERR_INVALID_W5_MESSAGE):

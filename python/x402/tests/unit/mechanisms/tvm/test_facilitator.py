@@ -477,13 +477,15 @@ def _make_trace(
     payer_tx_success: bool = True,
     include_matching_payer_out_msg: bool = True,
     include_source_wallet_tx: bool = True,
-    payer_hash: str | None = "payer-tx-hash",
+    payer_hash: str | None = "q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s=",
+    payer_hash_norm: str | None = "payer-tx-hash-norm",
 ):
     settlement = _make_settlement()
     transactions: dict[str, object] = {}
     if include_payer_tx:
         transactions["payer"] = {
             "hash": payer_hash,
+            **({"hash_norm": payer_hash_norm} if payer_hash_norm is not None else {}),
             "account": PAYER,
             "description": {
                 "aborted": not payer_tx_success,
@@ -561,7 +563,7 @@ class TestVerifyFinalizedTraceSettlement:
             )
 
     def test_should_fail_when_payer_wallet_transaction_has_no_hash(self):
-        settlement, trace = _make_trace(payer_hash="")
+        settlement, trace = _make_trace(payer_hash="", payer_hash_norm="")
 
         with pytest.raises(ValueError, match="missing transaction hash"):
             ExactTvmFacilitatorScheme._verify_finalized_trace_settlement(
@@ -570,17 +572,33 @@ class TestVerifyFinalizedTraceSettlement:
             )
 
     def test_should_return_payer_transaction_hash_for_valid_trace(self):
-        settlement, trace = _make_trace()
+        settlement, trace = _make_trace(
+            payer_hash="q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s=",
+            payer_hash_norm="q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s=",
+        )
 
         result = ExactTvmFacilitatorScheme._verify_finalized_trace_settlement(
             trace,
             settlement=settlement,
         )
 
-        assert result == "payer-tx-hash"
+        assert result == "ab" * 32
+
+    def test_should_prefer_normalized_payer_transaction_hash_when_present(self):
+        settlement, trace = _make_trace(
+            payer_hash="q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s=",
+            payer_hash_norm="zMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMw=",
+        )
+
+        result = ExactTvmFacilitatorScheme._verify_finalized_trace_settlement(
+            trace,
+            settlement=settlement,
+        )
+
+        assert result == "cc" * 32
 
     def test_should_return_payer_transaction_object_when_requested(self):
-        settlement, trace = _make_trace()
+        settlement, trace = _make_trace(payer_hash_norm=None)
 
         result = ExactTvmFacilitatorScheme._verify_finalized_trace_settlement(
             trace,
@@ -588,4 +606,4 @@ class TestVerifyFinalizedTraceSettlement:
             return_transaction=True,
         )
 
-        assert result["hash"] == "payer-tx-hash"
+        assert result["hash"] == "q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s="

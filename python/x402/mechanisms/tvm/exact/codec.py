@@ -11,6 +11,7 @@ from ..constants import (
     ERR_INVALID_SETTLEMENT_BOC,
     ERR_INVALID_W5_ACTIONS,
     ERR_INVALID_W5_MESSAGE,
+    SEND_MODE_IGNORE_ERRORS,
     SEND_MODE_PAY_FEES_SEPARATELY,
     W5_INTERNAL_SIGNED_OPCODE,
 )
@@ -33,7 +34,7 @@ def parse_exact_tvm_payload(settlement_boc: str) -> ParsedTvmSettlement:
     except Exception as exc:
         raise ValueError(ERR_INVALID_SETTLEMENT_BOC) from exc
 
-    if not message.is_internal or message.info.dest is None or message.info.bounce is not True:
+    if not message.is_internal or message.info.dest is None:
         raise ValueError(ERR_INVALID_SETTLEMENT_BOC)
 
     payer = normalize_address(message.info.dest)
@@ -62,7 +63,11 @@ def parse_exact_tvm_payload(settlement_boc: str) -> ParsedTvmSettlement:
     if not action.out_msg.is_internal or action.out_msg.info.dest is None:
         raise ValueError(ERR_INVALID_W5_ACTIONS)
 
-    if action.mode != SEND_MODE_PAY_FEES_SEPARATELY:
+    allowed_send_modes = {
+        SEND_MODE_PAY_FEES_SEPARATELY,
+        SEND_MODE_PAY_FEES_SEPARATELY + SEND_MODE_IGNORE_ERRORS,
+    }
+    if action.mode not in allowed_send_modes:
         raise ValueError(ERR_INVALID_W5_ACTIONS)
 
     transfer = parse_jetton_transfer(

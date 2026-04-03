@@ -10,6 +10,7 @@ from x402.mechanisms.tvm.trace_utils import (
     body_hash_to_base64,
     message_body_hash_matches,
     parse_trace_transactions,
+    trace_transaction_hash_to_hex,
     trace_transaction_balance_before,
     trace_transaction_compute_fees,
     trace_transaction_fwd_fees,
@@ -94,6 +95,14 @@ class TestBodyHashes:
         raw_hash = b"\x01\x02\x03"
 
         assert body_hash_to_base64(raw_hash) == base64.b64encode(raw_hash).decode("ascii")
+
+    def test_should_convert_toncenter_transaction_hash_to_hex(self):
+        raw_hash = bytes(range(32))
+
+        assert (
+            trace_transaction_hash_to_hex(base64.b64encode(raw_hash).decode("ascii"))
+            == raw_hash.hex()
+        )
 
     def test_should_match_message_content_hash(self):
         raw_hash = b"\x05" * 32

@@ -59,6 +59,7 @@ from ..signer import FacilitatorTvmSigner
 from ..trace_utils import (
     message_body_hash_matches,
     parse_trace_transactions,
+    trace_transaction_hash_to_hex,
     trace_transaction_compute_fees,
     trace_transaction_fwd_fees,
     trace_transaction_storage_fees,
@@ -641,7 +642,11 @@ class ExactTvmScheme:
         if source_wallet_transaction is None:
             raise ValueError("Trace does not contain the expected source jetton wallet transaction")
 
-        transaction_hash = payer_transaction.get("hash")
-        if not isinstance(transaction_hash, str) or not transaction_hash:
+        transaction_hash = payer_transaction.get("hash_norm") or payer_transaction.get("hash")
+        if not transaction_hash:
             raise ValueError("Trace payer wallet transaction is missing transaction hash")
-        return payer_transaction if return_transaction else transaction_hash
+        return (
+            payer_transaction
+            if return_transaction
+            else trace_transaction_hash_to_hex(transaction_hash)
+        )
