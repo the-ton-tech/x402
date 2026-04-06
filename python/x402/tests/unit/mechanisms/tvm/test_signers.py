@@ -9,10 +9,11 @@ import pytest
 
 pytest.importorskip("pytoniq_core")
 
-from pytoniq_core.crypto.keys import mnemonic_to_wallet_key
-
 from x402.mechanisms.tvm import TVM_MAINNET, TVM_TESTNET
-from x402.mechanisms.tvm.constants import DEFAULT_STREAMING_CONFIRMATION_GRACE_SECONDS
+from x402.mechanisms.tvm.constants import (
+    DEFAULT_STREAMING_CONFIRMATION_GRACE_SECONDS,
+    DEFAULT_TONCENTER_EMULATION_TIMEOUT_SECONDS,
+)
 from x402.mechanisms.tvm.signers import (
     FacilitatorHighloadV3Signer,
     HighloadV3Config,
@@ -20,10 +21,8 @@ from x402.mechanisms.tvm.signers import (
     WalletV5R1MnemonicSigner,
 )
 from x402.mechanisms.tvm.types import TvmAccountState
-
-MNEMONIC = (
-    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
-)
+from .builders import TEST_MNEMONIC, derive_test_secret_key
+from .helpers import start_captured_thread
 
 
 class TestWalletV5R1Config:
@@ -55,7 +54,7 @@ class TestWalletV5R1Config:
     def test_from_private_key_should_accept_hex_and_base64_seed_or_secret_key(
         self, private_key, factory
     ):
-        _, secret_key = mnemonic_to_wallet_key(MNEMONIC.split())
+        secret_key = derive_test_secret_key()
         seed = secret_key[:32]
 
         config = factory(private_key(secret_key, seed))
@@ -70,7 +69,7 @@ class TestWalletV5R1Config:
 
 class TestWalletV5R1MnemonicSigner:
     def test_should_expose_network_wallet_id_state_init_and_address(self):
-        config = WalletV5R1Config.from_mnemonic(TVM_TESTNET, MNEMONIC)
+        config = WalletV5R1Config.from_mnemonic(TVM_TESTNET, TEST_MNEMONIC)
 
         signer = WalletV5R1MnemonicSigner(config)
 
@@ -81,7 +80,7 @@ class TestWalletV5R1MnemonicSigner:
         assert len(signer.address) == 66
 
     def test_sign_message_should_return_ed25519_signature(self):
-        config = WalletV5R1Config.from_mnemonic(TVM_TESTNET, MNEMONIC)
+        config = WalletV5R1Config.from_mnemonic(TVM_TESTNET, TEST_MNEMONIC)
         signer = WalletV5R1MnemonicSigner(config)
 
         signature = signer.sign_message(b"message-hash")
@@ -107,7 +106,7 @@ class TestHighloadV3Config:
         ],
     )
     def test_from_private_key_should_accept_hex_seed_or_secret_key(self, private_key, factory):
-        _, secret_key = mnemonic_to_wallet_key(MNEMONIC.split())
+        secret_key = derive_test_secret_key()
         seed = secret_key[:32]
 
         config = factory(private_key(secret_key, seed))
@@ -117,7 +116,7 @@ class TestHighloadV3Config:
 
 class TestFacilitatorHighloadV3Signer:
     def test_get_addresses_for_network_should_return_only_requested_wallet(self):
-        _, secret_key = mnemonic_to_wallet_key(MNEMONIC.split())
+        secret_key = derive_test_secret_key()
         signer = FacilitatorHighloadV3Signer(
             {
                 TVM_TESTNET: HighloadV3Config(secret_key=secret_key, subwallet_id=1),
@@ -134,7 +133,7 @@ class TestFacilitatorHighloadV3Signer:
         assert signer.get_addresses() == testnet_addresses + mainnet_addresses
 
     def test_wait_for_trace_confirmation_fetches_full_trace_after_stream_signal(self, monkeypatch):
-        _, secret_key = mnemonic_to_wallet_key(MNEMONIC.split())
+        secret_key = derive_test_secret_key()
         signer = FacilitatorHighloadV3Signer(
             {
                 TVM_TESTNET: HighloadV3Config(
@@ -190,7 +189,7 @@ class TestFacilitatorHighloadV3Signer:
     def test_wait_for_trace_confirmation_uses_remaining_budget_for_rest_after_stream_timeout(
         self, monkeypatch
     ):
-        _, secret_key = mnemonic_to_wallet_key(MNEMONIC.split())
+        secret_key = derive_test_secret_key()
         signer = FacilitatorHighloadV3Signer(
             {
                 TVM_TESTNET: HighloadV3Config(
@@ -245,8 +244,40 @@ class TestFacilitatorHighloadV3Signer:
         assert trace_calls == ["trace-hash-1"]
         assert result == expected_trace
 
+    def test_emulate_external_message_uses_emulation_timeout(self, monkeypatch):
+        secret_key = derive_test_secret_key()
+        signer = FacilitatorHighloadV3Signer(
+            {
+                TVM_TESTNET: HighloadV3Config(
+                    secret_key=secret_key,
+                    toncenter_emulation_timeout_seconds=17.5,
+                )
+            }
+        )
+        emulate_calls: list[tuple[bytes, float]] = []
+
+        class _FakeProviderClient:
+            def emulate_trace(self, boc: bytes, *, ignore_chksig: bool = False, timeout: float):
+                assert ignore_chksig is False
+                emulate_calls.append((boc, timeout))
+                return {"transactions": {}}
+
+        monkeypatch.setattr(signer, "_client", lambda network: _FakeProviderClient())
+
+        result = signer.emulate_external_message(TVM_TESTNET, b"external-boc")
+
+        assert result == {"transactions": {}}
+        assert emulate_calls == [(b"external-boc", 17.5)]
+
+    def test_wallet_config_defaults_emulation_timeout(self):
+        config = WalletV5R1Config.from_mnemonic(TVM_TESTNET, TEST_MNEMONIC)
+
+        assert config.toncenter_emulation_timeout_seconds == (
+            DEFAULT_TONCENTER_EMULATION_TIMEOUT_SECONDS
+        )
+
     def test_select_query_id_fetches_account_state_outside_lock(self, monkeypatch):
-        _, secret_key = mnemonic_to_wallet_key(MNEMONIC.split())
+        secret_key = derive_test_secret_key()
         signer = FacilitatorHighloadV3Signer(
             {
                 TVM_TESTNET: HighloadV3Config(
@@ -292,7 +323,7 @@ class TestFacilitatorHighloadV3Signer:
         assert query_id >= 0
 
     def test_ensure_streaming_watcher_starts_only_one_sse_connection(self, monkeypatch):
-        _, secret_key = mnemonic_to_wallet_key(MNEMONIC.split())
+        secret_key = derive_test_secret_key()
         signer = FacilitatorHighloadV3Signer(
             {
                 TVM_TESTNET: HighloadV3Config(
@@ -321,20 +352,17 @@ class TestFacilitatorHighloadV3Signer:
 
         monkeypatch.setattr(signer, "_streaming_client", lambda network: _FakeStreamingClient())
 
-        first = threading.Thread(
-            target=lambda: results.append(signer._ensure_streaming_watcher(TVM_TESTNET))
+        first = start_captured_thread(
+            lambda: results.append(signer._ensure_streaming_watcher(TVM_TESTNET))
         )
-        second = threading.Thread(
-            target=lambda: results.append(signer._ensure_streaming_watcher(TVM_TESTNET))
-        )
-
-        first.start()
         assert start_entered.wait(timeout=1.0)
-        second.start()
+        second = start_captured_thread(
+            lambda: results.append(signer._ensure_streaming_watcher(TVM_TESTNET))
+        )
         allow_finish.set()
 
-        first.join(timeout=1.0)
-        second.join(timeout=1.0)
+        first.join()
+        second.join()
 
         assert start_calls == 1
         assert results == [True, True]

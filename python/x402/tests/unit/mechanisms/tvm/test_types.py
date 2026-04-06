@@ -54,6 +54,21 @@ class TestExactTvmPayload:
 
         assert restored == original
 
+    def test_from_dict_should_reject_missing_settlement_boc(self):
+        """from_dict should reject payloads without settlementBoc."""
+        with pytest.raises(ValueError, match="settlementBoc.*required"):
+            ExactTvmPayload.from_dict({"asset": "0:" + "2" * 64})
+
+    def test_from_dict_should_reject_empty_asset(self):
+        """from_dict should reject payloads with an empty asset."""
+        with pytest.raises(ValueError, match="asset.*required"):
+            ExactTvmPayload.from_dict(
+                {
+                    "settlementBoc": "base64-boc==",
+                    "asset": "   ",
+                }
+            )
+
 
 class TestParsedTypes:
     """Test TVM parsed settlement dataclasses."""
@@ -64,6 +79,7 @@ class TestParsedTypes:
             address="0:" + "4" * 64,
             balance=123,
             is_active=True,
+            is_frozen=False,
             is_uninitialized=False,
             state_init=None,
         )

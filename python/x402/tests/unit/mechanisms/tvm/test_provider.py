@@ -13,7 +13,11 @@ pytest.importorskip("pytoniq_core")
 from pytoniq_core import Address, begin_cell
 
 import x402.mechanisms.tvm.provider as provider_module
-from x402.mechanisms.tvm import TVM_MAINNET, TVM_TESTNET
+from x402.mechanisms.tvm import (
+    DEFAULT_TONCENTER_EMULATION_TIMEOUT_SECONDS,
+    TVM_MAINNET,
+    TVM_TESTNET,
+)
 from x402.mechanisms.tvm.provider import ToncenterRestClient, _default_base_url
 
 
@@ -87,6 +91,20 @@ class TestToncenterRestClientParsing:
         assert path == "/api/emulate/v1/emulateTrace"
         assert kwargs["json"]["ignore_chksig"] is True
         assert kwargs["json"]["with_actions"] is True
+        assert kwargs["timeout"] == DEFAULT_TONCENTER_EMULATION_TIMEOUT_SECONDS
+
+    def test_emulate_trace_should_allow_custom_timeout(self):
+        client = ToncenterRestClient(TVM_TESTNET)
+        fake_http = _FakeHttpClient(
+            [_json_response(200, {"transactions": {}}, path="/api/emulate/v1/emulateTrace")]
+        )
+        client._client = fake_http
+
+        client.emulate_trace(b"boc-bytes", timeout=9.5)
+
+        assert len(fake_http.calls) == 1
+        _, _, kwargs = fake_http.calls[0]
+        assert kwargs["timeout"] == 9.5
 
     def test_get_account_state_should_decode_active_state_init(self):
         client = ToncenterRestClient(TVM_TESTNET)
@@ -142,6 +160,27 @@ class TestToncenterRestClientParsing:
 
         assert account.is_active is False
         assert account.is_uninitialized is True
+        assert account.state_init is None
+
+    def test_get_account_state_should_return_synthetic_uninitialized_state_for_empty_accounts(self):
+        client = ToncenterRestClient(TVM_TESTNET)
+        client._client = _FakeHttpClient(
+            [
+                _json_response(
+                    200,
+                    {"accounts": []},
+                    path="/api/v3/accountStates",
+                )
+            ]
+        )
+
+        account = client.get_account_state("0:" + "2" * 64)
+
+        assert account.address == "0:" + "2" * 64
+        assert account.balance == 0
+        assert account.is_active is False
+        assert account.is_uninitialized is True
+        assert account.is_frozen is False
         assert account.state_init is None
 
     def test_run_get_method_should_reject_non_zero_exit_code(self):

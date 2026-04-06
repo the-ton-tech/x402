@@ -83,10 +83,8 @@ def trace_transaction_compute_fees(transaction: dict[str, object]) -> int:
 def trace_transaction_storage_fees(transaction: dict[str, object]) -> int:
     """Extract storage fees from a transaction description."""
     storage_phase: dict = _transaction_phases(transaction)["storage_ph"]
-    return (
-        _parse_int(storage_phase.get("storage_fees_collected"))
-        or _parse_int(storage_phase.get("storage_fees_due"))
-        or 0
+    return (_parse_int(storage_phase.get("storage_fees_collected")) or 0) + (
+        _parse_int(storage_phase.get("storage_fees_due")) or 0
     )
 
 

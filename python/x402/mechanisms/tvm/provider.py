@@ -9,6 +9,7 @@ from typing import Any
 
 from .codecs.common import address_to_stack_item, normalize_address
 from .constants import (
+    DEFAULT_TONCENTER_EMULATION_TIMEOUT_SECONDS,
     DEFAULT_TONCENTER_TIMEOUT_SECONDS,
     TONCENTER_MAINNET_BASE_URL,
     TONCENTER_TESTNET_BASE_URL,
@@ -50,14 +51,22 @@ class ToncenterRestClient:
         self._client = httpx.Client(base_url=root_url, headers=headers, timeout=timeout)
 
     def get_account_state(self, address: str) -> TvmAccountState:
+        address = normalize_address(address)
         response = self._request(
             "GET",
             "/api/v3/accountStates",
-            params={"address": [normalize_address(address)], "include_boc": "true"},
+            params={"address": [address], "include_boc": "true"},
         )
         accounts = response.get("accounts") or []
         if not accounts:
-            raise RuntimeError(f"Toncenter returned no account state for {address}")
+            return TvmAccountState(
+                address=address,
+                balance=0,
+                is_active=False,
+                is_uninitialized=True,
+                is_frozen=False,
+                state_init=None,
+            )
 
         account = accounts[0]
         status = str(account.get("status") or "")
@@ -71,7 +80,7 @@ class ToncenterRestClient:
             )
 
         return TvmAccountState(
-            address=normalize_address(account.get("address") or address),
+            address=address,
             balance=int(account.get("balance") or 0),
             is_active=status == "active",
             is_uninitialized=status in {"uninit", "nonexist"},
@@ -107,7 +116,13 @@ class ToncenterRestClient:
         )
         return str(response.get("message_hash_norm") or response["message_hash"])
 
-    def emulate_trace(self, boc: bytes, *, ignore_chksig: bool = False) -> dict[str, Any]:
+    def emulate_trace(
+        self,
+        boc: bytes,
+        *,
+        ignore_chksig: bool = False,
+        timeout: float = DEFAULT_TONCENTER_EMULATION_TIMEOUT_SECONDS,
+    ) -> dict[str, Any]:
         response = self._request(
             "POST",
             "/api/emulate/v1/emulateTrace",
@@ -116,6 +131,7 @@ class ToncenterRestClient:
                 "ignore_chksig": ignore_chksig,
                 "with_actions": True,
             },
+            timeout=timeout,
         )
         if not isinstance(response, dict):
             raise RuntimeError("Toncenter returned an invalid emulateTrace response")
@@ -171,6 +187,8 @@ class ToncenterRestClient:
 
     def _parse_stack_cell(self, item: dict[str, object]) -> Cell:
         value = item.get("value")
+        if not value:
+            raise RuntimeError(f"Can't parse cell stack value")
         return Cell.one_from_boc(base64.b64decode(value))
 
     def _parse_stack_num(self, item: dict[str, object]) -> int:

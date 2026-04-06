@@ -12,9 +12,9 @@ from pytoniq.contract.contract import Contract
 from pytoniq_core import Address, Cell, begin_cell
 
 from x402.mechanisms.tvm.constants import (
-    ERR_INVALID_SETTLEMENT_BOC,
-    ERR_INVALID_W5_ACTIONS,
-    ERR_INVALID_W5_MESSAGE,
+    ERR_EXACT_TVM_INVALID_SETTLEMENT_BOC,
+    ERR_EXACT_TVM_INVALID_W5_ACTIONS,
+    ERR_EXACT_TVM_INVALID_W5_MESSAGE,
     JETTON_TRANSFER_OPCODE,
     SEND_MODE_IGNORE_ERRORS,
     SEND_MODE_PAY_FEES_SEPARATELY,
@@ -118,11 +118,11 @@ def _make_settlement_boc(
 
 class TestParseExactTvmPayload:
     def test_should_reject_malformed_boc(self):
-        with pytest.raises(ValueError, match=ERR_INVALID_SETTLEMENT_BOC):
+        with pytest.raises(ValueError, match=ERR_EXACT_TVM_INVALID_SETTLEMENT_BOC):
             parse_exact_tvm_payload("not-base64")
 
     def test_should_reject_non_internal_message(self):
-        with pytest.raises(ValueError, match=ERR_INVALID_SETTLEMENT_BOC):
+        with pytest.raises(ValueError, match=ERR_EXACT_TVM_INVALID_SETTLEMENT_BOC):
             parse_exact_tvm_payload(_make_settlement_boc(internal=False))
 
     def test_should_accept_non_bounceable_settlement_wrapper(self):
@@ -132,17 +132,17 @@ class TestParseExactTvmPayload:
         assert payload.transfer.source_wallet == SOURCE_WALLET
 
     def test_should_reject_wrong_w5_opcode(self):
-        with pytest.raises(ValueError, match=ERR_INVALID_W5_MESSAGE):
+        with pytest.raises(ValueError, match=ERR_EXACT_TVM_INVALID_W5_MESSAGE):
             parse_exact_tvm_payload(_make_settlement_boc(body=_make_signed_body(opcode=0xDEADBEEF)))
 
     def test_should_reject_extra_actions_flag(self):
-        with pytest.raises(ValueError, match=ERR_INVALID_W5_ACTIONS):
+        with pytest.raises(ValueError, match=ERR_EXACT_TVM_INVALID_W5_ACTIONS):
             parse_exact_tvm_payload(
                 _make_settlement_boc(body=_make_signed_body(has_extra_actions=True))
             )
 
     def test_should_reject_wrong_action_count(self):
-        with pytest.raises(ValueError, match=ERR_INVALID_W5_ACTIONS):
+        with pytest.raises(ValueError, match=ERR_EXACT_TVM_INVALID_W5_ACTIONS):
             parse_exact_tvm_payload(_make_settlement_boc(body=_make_signed_body(has_actions=False)))
 
     def test_should_reject_invalid_action_type(self):
@@ -154,7 +154,7 @@ class TestParseExactTvmPayload:
             .end_cell()
         )
 
-        with pytest.raises(ValueError, match=ERR_INVALID_W5_ACTIONS):
+        with pytest.raises(ValueError, match=ERR_EXACT_TVM_INVALID_W5_ACTIONS):
             parse_exact_tvm_payload(
                 _make_settlement_boc(body=_make_signed_body(action_cell=invalid_action))
             )
@@ -169,7 +169,7 @@ class TestParseExactTvmPayload:
         ).serialize()
         wrong_mode_action = serialize_send_msg_action(out_msg, SEND_MODE_PAY_FEES_SEPARATELY + 1)
 
-        with pytest.raises(ValueError, match=ERR_INVALID_W5_ACTIONS):
+        with pytest.raises(ValueError, match=ERR_EXACT_TVM_INVALID_W5_ACTIONS):
             parse_exact_tvm_payload(
                 _make_settlement_boc(body=_make_signed_body(action_cell=wrong_mode_action))
             )
@@ -194,7 +194,7 @@ class TestParseExactTvmPayload:
         assert payload.transfer.source_wallet == SOURCE_WALLET
 
     def test_should_reject_trailing_bits_after_signature(self):
-        with pytest.raises(ValueError, match=ERR_INVALID_W5_MESSAGE):
+        with pytest.raises(ValueError, match=ERR_EXACT_TVM_INVALID_W5_MESSAGE):
             parse_exact_tvm_payload(_make_settlement_boc(body=_make_signed_body(trailing_bit=True)))
 
     def test_should_parse_valid_settlement_boc(self):

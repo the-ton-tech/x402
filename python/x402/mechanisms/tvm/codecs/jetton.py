@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from ....schemas import PaymentRequirements
-from ..constants import ERR_INVALID_JETTON_TRANSFER, JETTON_TRANSFER_OPCODE
+from ..constants import ERR_EXACT_TVM_INVALID_JETTON_TRANSFER, JETTON_TRANSFER_OPCODE
 from ..types import ParsedJettonTransfer
 from .common import decode_base64_boc, normalize_address
 
@@ -69,18 +69,18 @@ def parse_jetton_transfer(jetton_wallet: str, body: Cell) -> ParsedJettonTransfe
 
     opcode = body_slice.load_uint(32)
     if opcode != JETTON_TRANSFER_OPCODE:
-        raise ValueError(ERR_INVALID_JETTON_TRANSFER)
+        raise ValueError(ERR_EXACT_TVM_INVALID_JETTON_TRANSFER)
 
     body_slice.load_uint(64)
     amount = body_slice.load_coins()
     destination = body_slice.load_address()
     if destination is None:
-        raise ValueError(ERR_INVALID_JETTON_TRANSFER)
+        raise ValueError(ERR_EXACT_TVM_INVALID_JETTON_TRANSFER)
 
     response_destination = body_slice.load_address()
 
     if body_slice.load_bit():
-        raise ValueError(ERR_INVALID_JETTON_TRANSFER)
+        raise ValueError(ERR_EXACT_TVM_INVALID_JETTON_TRANSFER)
     forward_ton_amount = body_slice.load_coins()
     forward_payload = body_slice.load_ref() if body_slice.load_bit() else body_slice.to_cell()
 

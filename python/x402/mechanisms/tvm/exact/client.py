@@ -16,6 +16,7 @@ from ..constants import (
     DEFAULT_TVM_EMULATION_SEQNO,
     DEFAULT_TVM_EMULATION_WALLET_ID,
     DEFAULT_JETTON_WALLET_MESSAGE_AMOUNT,
+    DEFAULT_TONCENTER_EMULATION_TIMEOUT_SECONDS,
     DEFAULT_TONCENTER_TIMEOUT_SECONDS,
     DEFAULT_TVM_INNER_GAS_BUFFER,
     SCHEME_EXACT,
@@ -54,6 +55,12 @@ class ExactTvmScheme:
     def __init__(self, signer: ClientTvmSigner) -> None:
         self._signer = signer
         self._clients: dict[str, ToncenterRestClient] = {}
+
+    def close(self) -> None:
+        """Close any cached Toncenter clients owned by this scheme."""
+        for client in self._clients.values():
+            client.close()
+        self._clients.clear()
 
     def create_payment_payload(
         self,
@@ -230,20 +237,23 @@ class ExactTvmScheme:
         trace = client.emulate_trace(
             external_message.serialize().to_boc(),
             ignore_chksig=True,
+            timeout=getattr(
+                self._signer,
+                "toncenter_emulation_timeout_seconds",
+                DEFAULT_TONCENTER_EMULATION_TIMEOUT_SECONDS,
+            ),
         )
         transactions = parse_trace_transactions(trace)
 
         source_wallet_tx = None
         for transaction in transactions:
-            if normalize_address(str(transaction.get("account"))) != normalize_address(
-                source_wallet
-            ):
+            if normalize_address(transaction["account"]) != normalize_address(source_wallet):
                 continue
             if not transaction_succeeded(transaction):
                 continue
             in_msg = transaction.get("in_msg") or {}
             if in_msg.get("decoded_opcode") == "jetton_transfer" and normalize_address(
-                str(in_msg.get("source"))
+                in_msg["source"]
             ) == normalize_address(self._signer.address):
                 source_wallet_tx = transaction
                 break
@@ -256,7 +266,7 @@ class ExactTvmScheme:
                 continue
             in_msg = transaction.get("in_msg") or {}
             if in_msg.get("decoded_opcode") == "jetton_internal_transfer" and normalize_address(
-                str(in_msg.get("source"))
+                in_msg["source"]
             ) == normalize_address(source_wallet):
                 receiver_wallet_tx = transaction
                 break

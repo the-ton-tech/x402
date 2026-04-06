@@ -22,34 +22,37 @@ from ..codecs.w5 import (
     verify_w5_signature,
 )
 from ..constants import (
+    ALLOWED_CLIENT_CODES,
     DEFAULT_SETTLEMENT_BATCH_FLUSH_INTERVAL_SECONDS,
     DEFAULT_SETTLEMENT_BATCH_FLUSH_SIZE,
-    DEFAULT_STREAMING_CONFIRMATION_TIMEOUT_SECONDS,
+    DEFAULT_SETTLEMENT_CONFIRMATION_WORKERS,
+    DEFAULT_TRACE_CONFIRMATION_TIMEOUT_SECONDS,
     DEFAULT_TVM_OUTER_GAS_BUFFER,
-    ERR_DUPLICATE_SETTLEMENT,
-    ERR_ACCOUNT_FROZEN,
-    ERR_INSUFFICIENT_BALANCE,
-    ERR_INVALID_AMOUNT,
-    ERR_INVALID_ASSET,
-    ERR_INVALID_CODE_HASH,
-    ERR_INVALID_EXTENSIONS_DICT,
-    ERR_INVALID_JETTON_TRANSFER,
-    ERR_INVALID_RECIPIENT,
-    ERR_INVALID_SEQNO,
-    ERR_INVALID_SIGNATURE,
-    ERR_INVALID_SIGNATURE_MODE,
-    ERR_INVALID_UNTIL_EXPIRED,
-    ERR_INVALID_W5_MESSAGE,
-    ERR_INVALID_WALLET_ID,
-    ERR_NETWORK_MISMATCH,
-    ERR_SIMULATION_FAILED,
-    ERR_TRANSACTION_FAILED,
-    ERR_UNSUPPORTED_NETWORK,
-    ERR_UNSUPPORTED_SCHEME,
-    ERR_VALID_UNTIL_TOO_FAR,
+    ERR_EXACT_TVM_ACCOUNT_FROZEN,
+    ERR_EXACT_TVM_DUPLICATE_SETTLEMENT,
+    ERR_EXACT_TVM_INSUFFICIENT_BALANCE,
+    ERR_EXACT_TVM_INVALID_AMOUNT,
+    ERR_EXACT_TVM_INVALID_ASSET,
+    ERR_EXACT_TVM_INVALID_CODE_HASH,
+    ERR_EXACT_TVM_INVALID_EXTENSIONS_DICT,
+    ERR_EXACT_TVM_INVALID_JETTON_TRANSFER,
+    ERR_EXACT_TVM_INVALID_PAYLOAD,
+    ERR_EXACT_TVM_INVALID_RECIPIENT,
+    ERR_EXACT_TVM_INVALID_SEQNO,
+    ERR_EXACT_TVM_INVALID_SIGNATURE,
+    ERR_EXACT_TVM_INVALID_SIGNATURE_MODE,
+    ERR_EXACT_TVM_INVALID_UNTIL_EXPIRED,
+    ERR_EXACT_TVM_INVALID_W5_MESSAGE,
+    ERR_EXACT_TVM_INVALID_WALLET_ID,
+    ERR_EXACT_TVM_NETWORK_MISMATCH,
+    ERR_EXACT_TVM_SIMULATION_FAILED,
+    ERR_EXACT_TVM_TRANSACTION_FAILED,
+    ERR_EXACT_TVM_UNSUPPORTED_NETWORK,
+    ERR_EXACT_TVM_UNSUPPORTED_SCHEME,
+    ERR_EXACT_TVM_UNSUPPORTED_VERSION,
+    ERR_EXACT_TVM_VALID_UNTIL_TOO_FAR,
     SCHEME_EXACT,
     SUPPORTED_NETWORKS,
-    ALLOWED_CLIENT_CODES,
 )
 from ..settlement_cache import SettlementCache
 from ..signer import FacilitatorTvmSigner
@@ -98,7 +101,8 @@ class ExactTvmScheme:
         *,
         batch_flush_interval_seconds: float = DEFAULT_SETTLEMENT_BATCH_FLUSH_INTERVAL_SECONDS,
         batch_flush_size: int = DEFAULT_SETTLEMENT_BATCH_FLUSH_SIZE,
-        streaming_confirmation_timeout_seconds: float = DEFAULT_STREAMING_CONFIRMATION_TIMEOUT_SECONDS,
+        confirmation_workers: int = DEFAULT_SETTLEMENT_CONFIRMATION_WORKERS,
+        confirmation_timeout_seconds: float = DEFAULT_TRACE_CONFIRMATION_TIMEOUT_SECONDS,
     ) -> None:
         self._signer = signer
         self._settlement_cache = settlement_cache or SettlementCache()
@@ -107,7 +111,8 @@ class ExactTvmScheme:
             self._settlement_cache,
             flush_interval_seconds=batch_flush_interval_seconds,
             batch_flush_size=batch_flush_size,
-            confirmation_timeout_seconds=streaming_confirmation_timeout_seconds,
+            confirmation_workers=confirmation_workers,
+            confirmation_timeout_seconds=confirmation_timeout_seconds,
             settlement_verifier=lambda trace_data, settlement: (
                 self._verify_finalized_trace_settlement(
                     trace_data,
@@ -135,6 +140,15 @@ class ExactTvmScheme:
         """Verify a TON exact payment payload."""
         try:
             tvm_payload = ExactTvmPayload.from_dict(payload.payload)
+        except ValueError as e:
+            return VerifyResponse(
+                is_valid=False,
+                invalid_reason=ERR_EXACT_TVM_INVALID_PAYLOAD,
+                invalid_message=str(e),
+                payer="",
+            )
+
+        try:
             settlement = parse_exact_tvm_payload(tvm_payload.settlement_boc)
             verification, _ = self._verify(payload, requirements, tvm_payload, settlement)
             return verification
@@ -143,7 +157,7 @@ class ExactTvmScheme:
         except Exception as e:
             return VerifyResponse(
                 is_valid=False,
-                invalid_reason=ERR_SIMULATION_FAILED,
+                invalid_reason=ERR_EXACT_TVM_SIMULATION_FAILED,
                 invalid_message=str(e),
                 payer="",
             )
@@ -157,6 +171,17 @@ class ExactTvmScheme:
         """Settle a TON exact payment payload."""
         try:
             tvm_payload = ExactTvmPayload.from_dict(payload.payload)
+        except ValueError as e:
+            return SettleResponse(
+                success=False,
+                error_reason=ERR_EXACT_TVM_INVALID_PAYLOAD,
+                error_message=str(e),
+                payer="",
+                transaction="",
+                network=requirements.network,
+            )
+
+        try:
             settlement = parse_exact_tvm_payload(tvm_payload.settlement_boc)
             verification, relay_request = self._verify(
                 payload, requirements, tvm_payload, settlement
@@ -172,7 +197,7 @@ class ExactTvmScheme:
         except Exception as e:
             return SettleResponse(
                 success=False,
-                error_reason=ERR_SIMULATION_FAILED,
+                error_reason=ERR_EXACT_TVM_SIMULATION_FAILED,
                 error_message=str(e),
                 payer="",
                 transaction="",
@@ -188,12 +213,12 @@ class ExactTvmScheme:
                 network=requirements.network,
             )
 
-        if self._settlement_cache.reserve(
+        if self._settlement_cache.is_duplicate(
             settlement.settlement_hash, requirements.max_timeout_seconds
         ):
             return SettleResponse(
                 success=False,
-                error_reason=ERR_DUPLICATE_SETTLEMENT,
+                error_reason=ERR_EXACT_TVM_DUPLICATE_SETTLEMENT,
                 payer=settlement.payer,
                 transaction="",
                 network=requirements.network,
@@ -212,7 +237,7 @@ class ExactTvmScheme:
             self._settlement_cache.release(settlement.settlement_hash)
             batch_result = _BatchResult(
                 success=False,
-                error_reason=ERR_TRANSACTION_FAILED,
+                error_reason=ERR_EXACT_TVM_TRANSACTION_FAILED,
                 error_message=str(e),
             )
 
@@ -238,107 +263,107 @@ class ExactTvmScheme:
             return (VerifyResponse(is_valid=False, invalid_reason=reason, payer=payer), None)
 
         if payload.x402_version != 2:
-            return invalid_response(ERR_UNSUPPORTED_SCHEME)
+            return invalid_response(ERR_EXACT_TVM_UNSUPPORTED_VERSION)
 
         if payload.accepted.scheme != SCHEME_EXACT or requirements.scheme != SCHEME_EXACT:
-            return invalid_response(ERR_UNSUPPORTED_SCHEME)
+            return invalid_response(ERR_EXACT_TVM_UNSUPPORTED_SCHEME)
 
         if str(requirements.network) not in SUPPORTED_NETWORKS:
-            return invalid_response(ERR_UNSUPPORTED_NETWORK)
+            return invalid_response(ERR_EXACT_TVM_UNSUPPORTED_NETWORK)
 
         if str(payload.accepted.network) != str(requirements.network):
-            return invalid_response(ERR_NETWORK_MISMATCH)
+            return invalid_response(ERR_EXACT_TVM_NETWORK_MISMATCH)
 
         if int(payload.accepted.amount) != int(requirements.amount):
-            return invalid_response(ERR_INVALID_AMOUNT)
+            return invalid_response(ERR_EXACT_TVM_INVALID_AMOUNT)
 
         if normalize_address(payload.accepted.asset) != normalize_address(requirements.asset):
-            return invalid_response(ERR_INVALID_ASSET)
+            return invalid_response(ERR_EXACT_TVM_INVALID_ASSET)
 
         if normalize_address(payload.accepted.pay_to) != normalize_address(requirements.pay_to):
-            return invalid_response(ERR_INVALID_RECIPIENT)
+            return invalid_response(ERR_EXACT_TVM_INVALID_RECIPIENT)
 
         if (
             payload.accepted.extra.get("areFeesSponsored") is not True
             or requirements.extra.get("areFeesSponsored") is not True
         ):
-            return invalid_response(ERR_UNSUPPORTED_SCHEME)
+            return invalid_response(ERR_EXACT_TVM_UNSUPPORTED_SCHEME)
 
         if normalize_address(tvm_payload.asset) != normalize_address(requirements.asset):
-            return invalid_response(ERR_INVALID_ASSET)
+            return invalid_response(ERR_EXACT_TVM_INVALID_ASSET)
 
         expected_response_destination = _effective_response_destination(requirements.extra)
         if _effective_response_destination(payload.accepted.extra) != expected_response_destination:
-            return invalid_response(ERR_INVALID_JETTON_TRANSFER)
+            return invalid_response(ERR_EXACT_TVM_INVALID_JETTON_TRANSFER)
 
         expected_forward_ton_amount = _effective_forward_ton_amount(requirements.extra)
         if _effective_forward_ton_amount(payload.accepted.extra) != expected_forward_ton_amount:
-            return invalid_response(ERR_INVALID_JETTON_TRANSFER)
+            return invalid_response(ERR_EXACT_TVM_INVALID_JETTON_TRANSFER)
 
         expected_forward_payload = _effective_forward_payload(requirements.extra)
         if _effective_forward_payload(payload.accepted.extra).hash != expected_forward_payload.hash:
-            return invalid_response(ERR_INVALID_JETTON_TRANSFER)
+            return invalid_response(ERR_EXACT_TVM_INVALID_JETTON_TRANSFER)
 
         # Up to this point, we've checked all fields in PaymentRequirements and PaymentPayload except for settlementBoc
 
         if settlement.transfer.destination != normalize_address(requirements.pay_to):
-            return invalid_response(ERR_INVALID_RECIPIENT)
+            return invalid_response(ERR_EXACT_TVM_INVALID_RECIPIENT)
 
         if settlement.transfer.jetton_amount != int(requirements.amount):
-            return invalid_response(ERR_INVALID_AMOUNT)
+            return invalid_response(ERR_EXACT_TVM_INVALID_AMOUNT)
 
         if settlement.transfer.forward_ton_amount != expected_forward_ton_amount:
-            return invalid_response(ERR_INVALID_JETTON_TRANSFER)
+            return invalid_response(ERR_EXACT_TVM_INVALID_JETTON_TRANSFER)
         if settlement.transfer.response_destination != expected_response_destination:
-            return invalid_response(ERR_INVALID_JETTON_TRANSFER)
+            return invalid_response(ERR_EXACT_TVM_INVALID_JETTON_TRANSFER)
         if settlement.transfer.forward_payload.hash != expected_forward_payload.hash:
-            return invalid_response(ERR_INVALID_JETTON_TRANSFER)
+            return invalid_response(ERR_EXACT_TVM_INVALID_JETTON_TRANSFER)
 
         now = int(time.time())
         if settlement.valid_until <= now:
-            return invalid_response(ERR_INVALID_UNTIL_EXPIRED)
+            return invalid_response(ERR_EXACT_TVM_INVALID_UNTIL_EXPIRED)
         if settlement.valid_until > now + requirements.max_timeout_seconds:
-            return invalid_response(ERR_VALID_UNTIL_TOO_FAR)
+            return invalid_response(ERR_EXACT_TVM_VALID_UNTIL_TOO_FAR)
 
         account = self._signer.get_account_state(payer, str(requirements.network))
         init_data_parsed: W5InitData
 
         if account.is_frozen:
-            return invalid_response(ERR_ACCOUNT_FROZEN)
+            return invalid_response(ERR_EXACT_TVM_ACCOUNT_FROZEN)
 
         if settlement.state_init is not None and account.is_uninitialized:
             if (
                 settlement.state_init.code is None
                 or settlement.state_init.code.hash.hex() not in ALLOWED_CLIENT_CODES
             ):
-                return invalid_response(ERR_INVALID_CODE_HASH)
+                return invalid_response(ERR_EXACT_TVM_INVALID_CODE_HASH)
             payer_workchain = int(payer.split(":", 1)[0])
             if address_from_state_init(settlement.state_init, payer_workchain) != payer:
-                return invalid_response(ERR_INVALID_W5_MESSAGE)
+                return invalid_response(ERR_EXACT_TVM_INVALID_W5_MESSAGE)
             init_data_parsed = parse_w5_init_data(settlement.state_init)
             if init_data_parsed.seqno != 0:
-                return invalid_response(ERR_INVALID_SEQNO)
+                return invalid_response(ERR_EXACT_TVM_INVALID_SEQNO)
             if init_data_parsed.extensions_dict:
-                return invalid_response(ERR_INVALID_EXTENSIONS_DICT)
+                return invalid_response(ERR_EXACT_TVM_INVALID_EXTENSIONS_DICT)
         else:
             try:
                 init_data_parsed = parse_active_w5_account_state(account)
             except RuntimeError:
-                return invalid_response(ERR_INVALID_CODE_HASH)
+                return invalid_response(ERR_EXACT_TVM_INVALID_CODE_HASH)
 
         if not init_data_parsed.signature_allowed:
-            return invalid_response(ERR_INVALID_SIGNATURE_MODE)
+            return invalid_response(ERR_EXACT_TVM_INVALID_SIGNATURE_MODE)
         if init_data_parsed.seqno != settlement.seqno:
-            return invalid_response(ERR_INVALID_SEQNO)
+            return invalid_response(ERR_EXACT_TVM_INVALID_SEQNO)
         if init_data_parsed.wallet_id != settlement.wallet_id:
-            return invalid_response(ERR_INVALID_WALLET_ID)
+            return invalid_response(ERR_EXACT_TVM_INVALID_WALLET_ID)
 
         if not verify_w5_signature(
             init_data_parsed.public_key,
             settlement.signed_slice_hash,
             settlement.signature,
         ):
-            return invalid_response(ERR_INVALID_SIGNATURE)
+            return invalid_response(ERR_EXACT_TVM_INVALID_SIGNATURE)
 
         canonical_source_wallet = normalize_address(
             self._signer.get_jetton_wallet(
@@ -348,20 +373,20 @@ class ExactTvmScheme:
             )
         )
         if normalize_address(settlement.transfer.source_wallet) != canonical_source_wallet:
-            return invalid_response(ERR_INVALID_JETTON_TRANSFER)
+            return invalid_response(ERR_EXACT_TVM_INVALID_JETTON_TRANSFER)
 
         jetton_wallet_data = self._signer.get_jetton_wallet_data(
             settlement.transfer.source_wallet,
             str(requirements.network),
         )
         if normalize_address(jetton_wallet_data.owner) != payer:
-            return invalid_response(ERR_INVALID_RECIPIENT)
+            return invalid_response(ERR_EXACT_TVM_INVALID_RECIPIENT)
         if normalize_address(jetton_wallet_data.jetton_minter) != normalize_address(
             requirements.asset
         ):
-            return invalid_response(ERR_INVALID_ASSET)
+            return invalid_response(ERR_EXACT_TVM_INVALID_ASSET)
         if jetton_wallet_data.balance < settlement.transfer.jetton_amount:
-            return invalid_response(ERR_INSUFFICIENT_BALANCE)
+            return invalid_response(ERR_EXACT_TVM_INSUFFICIENT_BALANCE)
 
         try:
             provisional_relay_request = TvmRelayRequest(
@@ -400,7 +425,7 @@ class ExactTvmScheme:
             return (
                 VerifyResponse(
                     is_valid=False,
-                    invalid_reason=ERR_SIMULATION_FAILED,
+                    invalid_reason=ERR_EXACT_TVM_SIMULATION_FAILED,
                     invalid_message=str(e),
                     payer=payer,
                 ),
@@ -421,7 +446,7 @@ class ExactTvmScheme:
 
         payer_transaction = None
         for transaction in transactions:
-            if normalize_address(str(transaction.get("account"))) != settlement.payer:
+            if normalize_address(transaction["account"]) != settlement.payer:
                 continue
             if not transaction_succeeded(transaction):
                 continue
@@ -436,7 +461,7 @@ class ExactTvmScheme:
         out_msgs: list[dict] = payer_transaction.get("out_msgs")
         payer_out_hash = None
         for out_msg in out_msgs:
-            if normalize_address(str(out_msg.get("destination"))) != expected_source_wallet:
+            if normalize_address(out_msg["destination"]) != expected_source_wallet:
                 continue
             if not message_body_hash_matches(out_msg, settlement.transfer.body_hash):
                 continue
@@ -448,7 +473,7 @@ class ExactTvmScheme:
         # According to TEP-74, it is sufficient to check the success of the transaction on the payer's jetton wallet
         source_wallet_transaction = None
         for transaction in transactions:
-            if normalize_address(str(transaction.get("account"))) != expected_source_wallet:
+            if normalize_address(transaction["account"]) != expected_source_wallet:
                 continue
             if not transaction_succeeded(transaction):
                 continue

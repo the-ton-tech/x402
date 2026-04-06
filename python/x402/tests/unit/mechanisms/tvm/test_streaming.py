@@ -5,16 +5,79 @@ from __future__ import annotations
 import queue
 import threading
 import time
+from dataclasses import dataclass
 
 import pytest
 
 pytest.importorskip("pytoniq_core")
 
 import x402.mechanisms.tvm.streaming as streaming_module
-from x402.mechanisms.tvm.streaming import ToncenterStreamingSseClient, _account_stream_subscription
+from x402.mechanisms.tvm.streaming import (
+    ToncenterStreamingWatcher,
+    ToncenterStreamingSseClient,
+    _account_stream_subscription,
+    _iter_sse_json_events,
+    _iter_sse_payloads,
+)
+from .helpers import start_captured_thread
 
 TRACE_HASH = "trace-hash-1"
 FACILITATOR_ADDRESS = "0:" + "1" * 64
+
+
+@dataclass(frozen=True)
+class _ConsumePlan:
+    events: tuple[dict[str, object], ...] = ()
+    error: Exception | None = None
+    wait_on: threading.Event | None = None
+    sleep_seconds: float = 0.0
+    set_stop: bool = False
+
+
+def _subscribed_event() -> dict[str, str]:
+    return {"status": "subscribed"}
+
+
+def _finalized_trace_event(trace_hash: str = TRACE_HASH) -> dict[str, object]:
+    return {
+        "type": "transactions",
+        "finality": "finalized",
+        "trace_external_hash_norm": trace_hash,
+        "transactions": [],
+    }
+
+
+def _start_trace_waiter(
+    client: ToncenterStreamingSseClient,
+    *,
+    trace_hash: str = TRACE_HASH,
+    timeout_seconds: float = 1.0,
+):
+    return start_captured_thread(
+        lambda: client.wait_for_trace_confirmation(
+            trace_external_hash_norm=trace_hash,
+            timeout_seconds=timeout_seconds,
+        )
+    )
+
+
+def _planned_consumer(state: dict[str, int], plans: list[_ConsumePlan]):
+    def fake_consume_stream(*, subscription, stop_event, on_event, resources=None):
+        _ = subscription, resources
+        state["calls"] += 1
+        plan = plans[state["calls"] - 1]
+        for event in plan.events:
+            on_event(event)
+        if plan.wait_on is not None:
+            plan.wait_on.wait(timeout=1.0)
+        if plan.sleep_seconds:
+            time.sleep(plan.sleep_seconds)
+        if plan.set_stop:
+            stop_event.set()
+        if plan.error is not None:
+            raise plan.error
+
+    return fake_consume_stream
 
 
 def test_account_stream_subscription_uses_transactions_and_account_state_change():
@@ -25,42 +88,66 @@ def test_account_stream_subscription_uses_transactions_and_account_state_change(
     }
 
 
+def test_iter_sse_payloads_ignores_trailing_partial_event_without_blank_line():
+    lines = [
+        'data: {"status":"subscribed"}',
+        "",
+        'data: {"type":"transactions"',
+    ]
+
+    assert list(_iter_sse_payloads(lines)) == ['{"status":"subscribed"}']
+
+
+def test_iter_sse_json_events_ignores_trailing_partial_event_without_blank_line():
+    lines = [
+        'data: {"status":"subscribed"}',
+        "",
+        'data: {"type":"transactions"',
+    ]
+
+    assert list(_iter_sse_json_events(lines)) == [{"status": "subscribed"}]
+
+
+def test_streaming_watcher_reports_whether_the_caller_is_the_watcher_thread():
+    watcher = ToncenterStreamingWatcher(
+        threading.current_thread(),
+        threading.Event(),
+        close_stream=lambda: None,
+    )
+
+    assert watcher.is_current_thread() is True
+
+    result_holder: dict[str, bool] = {}
+
+    def check_from_other_thread() -> None:
+        result_holder["is_current_thread"] = watcher.is_current_thread()
+
+    other_thread = start_captured_thread(check_from_other_thread)
+    other_thread.join()
+    assert result_holder["is_current_thread"] is False
+
+
 def test_wait_for_trace_confirmation_returns_finalized_trace_payload_from_transactions_event(
     monkeypatch,
 ):
     client = ToncenterStreamingSseClient(base_url="https://toncenter.example")
     client._watcher = object()  # type: ignore[assignment]
 
-    result_holder: dict[str, object] = {}
-
-    def wait_for_trace() -> None:
-        result_holder["trace"] = client.wait_for_trace_confirmation(
+    waiter = start_captured_thread(
+        lambda: client.wait_for_trace_confirmation(
             trace_external_hash_norm=TRACE_HASH,
             timeout_seconds=1.0,
         )
-
-    waiter = threading.Thread(target=wait_for_trace)
-    waiter.start()
+    )
     client._handle_stream_event(
-        {
-            "type": "transactions",
-            "finality": "finalized",
-            "trace_external_hash_norm": TRACE_HASH,
-            "transactions": [],
-        },
+        _finalized_trace_event(),
         normalized_address=FACILITATOR_ADDRESS,
         on_invalidate=lambda: None,
         on_subscribed=lambda: None,
     )
-    waiter.join(timeout=1.0)
+    waiter.join()
 
-    assert waiter.is_alive() is False
-    assert result_holder["trace"] == {
-        "type": "transactions",
-        "finality": "finalized",
-        "trace_external_hash_norm": TRACE_HASH,
-        "transactions": [],
-    }
+    assert waiter.result == _finalized_trace_event()
 
 
 def test_start_account_state_watcher_retries_after_failed_start(monkeypatch):
@@ -68,11 +155,11 @@ def test_start_account_state_watcher_retries_after_failed_start(monkeypatch):
     state = {"calls": 0}
 
     def fake_consume_stream(*, subscription, stop_event, on_event, resources=None):
-        _ = subscription, on_event, resources
+        _ = subscription, resources
         state["calls"] += 1
         if state["calls"] == 1:
             raise RuntimeError("boom")
-        on_event({"status": "subscribed"})
+        on_event(_subscribed_event())
         while not stop_event.wait(0.01):
             pass
 
@@ -99,50 +186,33 @@ def test_wait_for_trace_confirmation_survives_stream_reconnect(monkeypatch):
     client = ToncenterStreamingSseClient(base_url="https://toncenter.example")
     state = {"calls": 0}
     monkeypatch.setattr(streaming_module, "DEFAULT_STREAMING_RECONNECT_BACKOFF_SECONDS", 0.01)
-
-    def fake_consume_stream(*, subscription, stop_event, on_event, resources=None):
-        _ = subscription, resources
-        state["calls"] += 1
-        if state["calls"] == 1:
-            on_event({"status": "subscribed"})
-            time.sleep(0.05)
-            raise RuntimeError("disconnect")
-        on_event({"status": "subscribed"})
-        on_event(
-            {
-                "type": "transactions",
-                "finality": "finalized",
-                "trace_external_hash_norm": TRACE_HASH,
-                "transactions": [],
-            }
-        )
-        stop_event.set()
-
-    monkeypatch.setattr(client, "_consume_stream", fake_consume_stream)
+    monkeypatch.setattr(
+        client,
+        "_consume_stream",
+        _planned_consumer(
+            state,
+            [
+                _ConsumePlan(
+                    events=(_subscribed_event(),),
+                    sleep_seconds=0.05,
+                    error=RuntimeError("disconnect"),
+                ),
+                _ConsumePlan(
+                    events=(_subscribed_event(), _finalized_trace_event()),
+                    set_stop=True,
+                ),
+            ],
+        ),
+    )
     watcher = client.start_account_state_watcher(
         address=FACILITATOR_ADDRESS,
         on_invalidate=lambda: None,
     )
     try:
-        result_holder: dict[str, object] = {}
+        waiter = _start_trace_waiter(client)
+        waiter.join()
 
-        def wait_for_trace() -> None:
-            result_holder["trace"] = client.wait_for_trace_confirmation(
-                trace_external_hash_norm=TRACE_HASH,
-                timeout_seconds=1.0,
-            )
-
-        waiter = threading.Thread(target=wait_for_trace)
-        waiter.start()
-        waiter.join(timeout=1.0)
-
-        assert waiter.is_alive() is False
-        assert result_holder["trace"] == {
-            "type": "transactions",
-            "finality": "finalized",
-            "trace_external_hash_norm": TRACE_HASH,
-            "transactions": [],
-        }
+        assert waiter.result == _finalized_trace_event()
         assert state["calls"] >= 2
     finally:
         watcher.close()
@@ -152,42 +222,34 @@ def test_wait_for_trace_confirmation_fails_after_max_consecutive_stream_failures
     client = ToncenterStreamingSseClient(base_url="https://toncenter.example")
     state = {"calls": 0, "invalidations": 0}
     release_first_failure = threading.Event()
-    result_holder: dict[str, object] = {}
 
     monkeypatch.setattr(streaming_module, "DEFAULT_STREAMING_RECONNECT_BACKOFF_SECONDS", 0.01)
     monkeypatch.setattr(streaming_module, "DEFAULT_STREAMING_MAX_CONSECUTIVE_FAILURES", 2)
 
-    def fake_consume_stream(*, subscription, stop_event, on_event, resources=None):
-        _ = subscription, stop_event, resources
-        state["calls"] += 1
-        if state["calls"] == 1:
-            on_event({"status": "subscribed"})
-            release_first_failure.wait(timeout=1.0)
-            raise RuntimeError("disconnect-1")
-        raise RuntimeError("disconnect-2")
-
-    def wait_for_trace() -> None:
-        try:
-            client.wait_for_trace_confirmation(
-                trace_external_hash_norm=TRACE_HASH,
-                timeout_seconds=1.0,
-            )
-        except Exception as exc:  # pragma: no branch - test captures the first terminal result
-            result_holder["error"] = exc
-
-    monkeypatch.setattr(client, "_consume_stream", fake_consume_stream)
+    monkeypatch.setattr(
+        client,
+        "_consume_stream",
+        _planned_consumer(
+            state,
+            [
+                _ConsumePlan(
+                    events=(_subscribed_event(),),
+                    wait_on=release_first_failure,
+                    error=RuntimeError("disconnect-1"),
+                ),
+                _ConsumePlan(error=RuntimeError("disconnect-2")),
+            ],
+        ),
+    )
     watcher = client.start_account_state_watcher(
         address=FACILITATOR_ADDRESS,
         on_invalidate=lambda: state.__setitem__("invalidations", state["invalidations"] + 1),
     )
     try:
-        waiter = threading.Thread(target=wait_for_trace)
-        waiter.start()
+        waiter = _start_trace_waiter(client)
         release_first_failure.set()
         waiter.join(timeout=0.5)
-
-        assert waiter.is_alive() is False
-        error = result_holder["error"]
+        error = waiter.error
         assert isinstance(error, RuntimeError)
         assert str(error) == (
             "Toncenter facilitator account stream failed before confirmation: disconnect-2"

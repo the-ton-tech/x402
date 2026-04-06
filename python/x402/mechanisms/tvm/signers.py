@@ -29,6 +29,7 @@ from .constants import (
     DEFAULT_HIGHLOAD_TIMEOUT,
     DEFAULT_RELAY_AMOUNT,
     DEFAULT_STREAMING_CONFIRMATION_GRACE_SECONDS,
+    DEFAULT_TONCENTER_EMULATION_TIMEOUT_SECONDS,
     DEFAULT_TONCENTER_TIMEOUT_SECONDS,
     DEFAULT_W5R1_SUBWALLET_NUMBER,
     HIGHLOAD_V3_CODE_HASH,
@@ -98,6 +99,7 @@ class HighloadV3Config:
     relay_amount: int = DEFAULT_RELAY_AMOUNT
     toncenter_base_url: str | None = None
     toncenter_timeout_seconds: float = DEFAULT_TONCENTER_TIMEOUT_SECONDS
+    toncenter_emulation_timeout_seconds: float = DEFAULT_TONCENTER_EMULATION_TIMEOUT_SECONDS
     workchain: int = 0
 
     @classmethod
@@ -152,6 +154,7 @@ class WalletV5R1Config:
     base_url: str | None = None
     subwallet_number: int = DEFAULT_W5R1_SUBWALLET_NUMBER
     toncenter_timeout_seconds: float = DEFAULT_TONCENTER_TIMEOUT_SECONDS
+    toncenter_emulation_timeout_seconds: float = DEFAULT_TONCENTER_EMULATION_TIMEOUT_SECONDS
     workchain: int = 0
 
     @classmethod
@@ -225,6 +228,10 @@ class WalletV5R1MnemonicSigner:
     @property
     def toncenter_timeout_seconds(self) -> float:
         return self._config.toncenter_timeout_seconds
+
+    @property
+    def toncenter_emulation_timeout_seconds(self) -> float:
+        return self._config.toncenter_emulation_timeout_seconds
 
     @property
     def wallet_id(self) -> int:
@@ -384,7 +391,10 @@ class FacilitatorHighloadV3Signer:
 
     def emulate_external_message(self, network: str, external_boc: bytes) -> dict[str, object]:
         """Emulate a prepared external message via Toncenter."""
-        return self._client(network).emulate_trace(external_boc)
+        return self._client(network).emulate_trace(
+            external_boc,
+            timeout=self._configs[network].toncenter_emulation_timeout_seconds,
+        )
 
     def send_external_message(self, network: str, external_boc: bytes) -> str:
         """Broadcast a prepared external message via Toncenter."""

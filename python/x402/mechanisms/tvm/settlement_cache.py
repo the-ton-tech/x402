@@ -17,8 +17,12 @@ class SettlementCache:
         self._entries: dict[str, float] = {}
         self._lock = threading.Lock()
 
-    def reserve(self, key: str, ttl_seconds: float) -> bool:
-        """Return ``True`` when *key* is already pending; otherwise reserve it."""
+    def is_duplicate(self, key: str, ttl_seconds: float) -> bool:
+        """Return ``True`` if *key* is already pending settlement (duplicate).
+
+        When ``False`` the key is recorded as newly pending.
+        Callers should reject the settlement when this returns ``True``.
+        """
         now = time.monotonic()
         expires_at = now + max(0.0, ttl_seconds)
         with self._lock:
@@ -30,13 +34,10 @@ class SettlementCache:
 
     def release(self, key: str) -> None:
         """Remove *key* from the pending settlement set."""
+        now = time.monotonic()
         with self._lock:
+            self._prune(now)
             self._entries.pop(key, None)
-
-    @property
-    def entries(self) -> dict[str, float]:
-        """Direct access to the underlying dict for tests."""
-        return self._entries
 
     def _prune(self, now: float) -> None:
         expired = [key for key, expires_at in self._entries.items() if expires_at <= now]

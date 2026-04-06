@@ -10,8 +10,9 @@ from dataclasses import dataclass, field
 
 from ..constants import (
     DEFAULT_SETTLEMENT_BATCH_MAX_SIZE,
-    ERR_SIMULATION_FAILED,
-    ERR_TRANSACTION_FAILED,
+    DEFAULT_SETTLEMENT_CONFIRMATION_WORKERS,
+    ERR_EXACT_TVM_SIMULATION_FAILED,
+    ERR_EXACT_TVM_TRANSACTION_FAILED,
 )
 from ..settlement_cache import SettlementCache
 from ..signer import FacilitatorTvmSigner
@@ -51,6 +52,7 @@ class _SettlementBatcher:
         *,
         flush_interval_seconds: float,
         batch_flush_size: int,
+        confirmation_workers: int = DEFAULT_SETTLEMENT_CONFIRMATION_WORKERS,
         confirmation_timeout_seconds: float,
         settlement_verifier: Callable[[dict[str, object], ParsedTvmSettlement], str],
     ) -> None:
@@ -61,6 +63,8 @@ class _SettlementBatcher:
         self._max_batch_size = DEFAULT_SETTLEMENT_BATCH_MAX_SIZE
         self._confirmation_timeout_seconds = confirmation_timeout_seconds
         self._settlement_verifier = settlement_verifier
+        if confirmation_workers < 1:
+            raise ValueError("confirmation_workers must be at least 1")
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
         self._confirmation_queue: queue.SimpleQueue[_PendingConfirmation] = queue.SimpleQueue()
@@ -76,7 +80,7 @@ class _SettlementBatcher:
                 name=f"tvm-settlement-confirmation-{idx}",
                 daemon=True,
             )
-            for idx in range(4)
+            for idx in range(confirmation_workers)
         ]
         for worker in self._confirmation_workers:
             worker.start()
@@ -139,19 +143,15 @@ class _SettlementBatcher:
             trace_external_hash_norm = self._signer.send_external_message(network, external_boc)
         except Exception as exc:
             for queued in batch:
-                self._settlement_cache.release(queued.settlement_hash)
-            for queued in batch:
-                queued.result = _BatchResult(
-                    success=False,
-                    transaction="",
+                self._fail_queued_settlement(
+                    queued,
                     error_reason=(
-                        ERR_SIMULATION_FAILED
+                        ERR_EXACT_TVM_SIMULATION_FAILED
                         if isinstance(exc, ValueError)
-                        else ERR_TRANSACTION_FAILED
+                        else ERR_EXACT_TVM_TRANSACTION_FAILED
                     ),
                     error_message=str(exc),
                 )
-                queued.completed.set()
             return
 
         self._confirmation_queue.put(
@@ -173,18 +173,15 @@ class _SettlementBatcher:
                 )
             except Exception as exc:
                 for queued in pending.batch:
-                    self._settlement_cache.release(queued.settlement_hash)
-                    queued.result = _BatchResult(
-                        success=False,
-                        transaction="",
+                    self._fail_queued_settlement(
+                        queued,
                         error_reason=(
-                            ERR_SIMULATION_FAILED
+                            ERR_EXACT_TVM_SIMULATION_FAILED
                             if isinstance(exc, ValueError)
-                            else ERR_TRANSACTION_FAILED
+                            else ERR_EXACT_TVM_TRANSACTION_FAILED
                         ),
                         error_message=str(exc),
                     )
-                    queued.completed.set()
                 continue
 
             for queued in pending.batch:
@@ -198,11 +195,26 @@ class _SettlementBatcher:
                         transaction=transaction_hash,
                     )
                 except Exception as exc:
-                    self._settlement_cache.release(queued.settlement_hash)
-                    queued.result = _BatchResult(
-                        success=False,
-                        transaction="",
-                        error_reason=ERR_TRANSACTION_FAILED,
+                    self._fail_queued_settlement(
+                        queued,
+                        error_reason=ERR_EXACT_TVM_TRANSACTION_FAILED,
                         error_message=str(exc),
                     )
+                    continue
                 queued.completed.set()
+
+    def _fail_queued_settlement(
+        self,
+        queued: _QueuedSettlement,
+        *,
+        error_reason: str,
+        error_message: str,
+    ) -> None:
+        queued.result = _BatchResult(
+            success=False,
+            transaction="",
+            error_reason=error_reason,
+            error_message=error_message,
+        )
+        queued.completed.set()
+        self._settlement_cache.release(queued.settlement_hash)

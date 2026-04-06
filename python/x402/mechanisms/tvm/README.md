@@ -43,6 +43,8 @@ client.register(TVM_TESTNET, ExactTvmScheme(signer=signer))
 payload = await client.create_payment_payload(payment_required)
 ```
 
+Call `scheme.close()` when you are done with a long-lived `ExactTvmScheme` so its cached Toncenter HTTP clients are released.
+
 ### Server
 
 ```python

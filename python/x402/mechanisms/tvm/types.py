@@ -31,9 +31,17 @@ class ExactTvmPayload:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ExactTvmPayload:
         """Create from dictionary."""
+        settlement_boc = data.get("settlementBoc")
+        if not isinstance(settlement_boc, str) or not settlement_boc.strip():
+            raise ValueError("Exact TVM payload field 'settlementBoc' is required")
+
+        asset = data.get("asset")
+        if not isinstance(asset, str) or not asset.strip():
+            raise ValueError("Exact TVM payload field 'asset' is required")
+
         return cls(
-            settlement_boc=data.get("settlementBoc", ""),
-            asset=data.get("asset", ""),
+            settlement_boc=settlement_boc,
+            asset=asset,
         )
 
 

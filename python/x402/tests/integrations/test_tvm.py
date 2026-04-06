@@ -29,8 +29,6 @@ pytest.importorskip("pytoniq_core")
 
 from x402 import x402ClientSync, x402FacilitatorSync, x402ResourceServerSync
 from x402.mechanisms.tvm import (
-    ERR_DUPLICATE_SETTLEMENT,
-    ERR_INVALID_SEQNO,
     SCHEME_EXACT,
     TVM_TESTNET,
     USDT_TESTNET_MINTER,
@@ -41,6 +39,12 @@ from x402.mechanisms.tvm import (
     WalletV5R1Config,
     WalletV5R1MnemonicSigner,
     parse_exact_tvm_payload,
+)
+from x402.mechanisms.tvm.constants import (
+    ERR_EXACT_TVM_DUPLICATE_SETTLEMENT as ERR_DUPLICATE_SETTLEMENT,
+    ERR_EXACT_TVM_INVALID_AMOUNT,
+    ERR_EXACT_TVM_INVALID_RECIPIENT,
+    ERR_EXACT_TVM_INVALID_SEQNO as ERR_INVALID_SEQNO,
 )
 from x402.mechanisms.tvm.exact import (
     ExactTvmClientScheme,
@@ -498,7 +502,7 @@ class TestTvmIntegrationV2:
 
         verify_response = self.server.verify_payment(payload, different_accepts[0])
         assert verify_response.is_valid is False
-        assert "recipient" in verify_response.invalid_reason.lower()
+        assert verify_response.invalid_reason == ERR_EXACT_TVM_INVALID_RECIPIENT
 
     def test_insufficient_amount_fails_verification(self) -> None:
         """Test that insufficient amount fails verification."""
@@ -522,7 +526,7 @@ class TestTvmIntegrationV2:
 
         verify_response = self.server.verify_payment(payload, higher_accepts[0])
         assert verify_response.is_valid is False
-        assert "amount" in verify_response.invalid_reason.lower()
+        assert verify_response.invalid_reason == ERR_EXACT_TVM_INVALID_AMOUNT
 
     def test_duplicate_settlement_fails_on_second_attempt(self) -> None:
         """Test that settling the same payload twice is rejected as duplicate."""

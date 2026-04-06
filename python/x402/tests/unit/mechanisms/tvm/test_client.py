@@ -13,278 +13,102 @@ from pytoniq_core import Address, begin_cell
 
 from x402.mechanisms.tvm import (
     TVM_TESTNET,
-    TvmAccountState,
-    address_from_state_init,
-    build_w5r1_state_init,
 )
 from x402.mechanisms.tvm.constants import (
+    DEFAULT_TONCENTER_EMULATION_TIMEOUT_SECONDS,
     DEFAULT_TVM_EMULATION_ADDRESS,
     DEFAULT_TVM_INNER_GAS_BUFFER,
 )
 from x402.mechanisms.tvm.exact import ExactTvmClientScheme
 from x402.mechanisms.tvm.exact.codec import parse_exact_tvm_payload
-from x402.schemas import PaymentRequirements
-
-MERCHANT = "0:" + "2" * 64
-ASSET = "0:" + "3" * 64
-SOURCE_WALLET = "0:" + "4" * 64
-RECEIVER_WALLET = "0:" + "5" * 64
-RESPONSE_DESTINATION = "0:" + "6" * 64
-EMULATION_ADDRESS = DEFAULT_TVM_EMULATION_ADDRESS
-
-
-class _SignerStub:
-    def __init__(self) -> None:
-        self._wallet_id = 7
-        self._state_init = build_w5r1_state_init(b"\x11" * 32, self._wallet_id)
-        self._address = address_from_state_init(self._state_init, 0)
-
-    @property
-    def address(self) -> str:
-        return self._address
-
-    @property
-    def network(self) -> str:
-        return TVM_TESTNET
-
-    @property
-    def wallet_id(self) -> int:
-        return self._wallet_id
-
-    @property
-    def state_init(self):
-        return self._state_init
-
-    def sign_message(self, message: bytes) -> bytes:
-        assert message
-        return b"\x00" * 64
+from .builders import (
+    ASSET,
+    MERCHANT,
+    RESPONSE_DESTINATION,
+    SOURCE_WALLET,
+    SPONSORED_EXTRA,
+    make_tvm_requirements,
+)
+from .fakes import ClientSignerStub, ToncenterClientStub
 
 
-class _ToncenterStub:
-    def __init__(
-        self,
-        *,
-        is_active: bool = False,
-        source_wallet_balance: int = 0,
-        source_wallet_fwd_fees: list[int] | None = None,
-        source_wallet_compute_fee: int = 0,
-        receiver_wallet_compute_fee: int = 0,
-        source_wallet_storage_fee: int = 0,
-        omit_receiver_tx: bool = False,
-        source_action_total_fwd_fees: int | None = None,
-    ) -> None:
-        self._is_active = is_active
-        self._source_wallet_balance = source_wallet_balance
-        self._source_wallet_fwd_fees = source_wallet_fwd_fees or [0]
-        self._source_wallet_compute_fee = source_wallet_compute_fee
-        self._receiver_wallet_compute_fee = receiver_wallet_compute_fee
-        self._source_wallet_storage_fee = source_wallet_storage_fee
-        self._omit_receiver_tx = omit_receiver_tx
-        self._source_action_total_fwd_fees = source_action_total_fwd_fees
-        self.get_account_state_calls = 0
-        self.get_jetton_wallet_calls: list[tuple[str, str]] = []
-        self.emulate_trace_calls: list[dict[str, object]] = []
-        self._signer_state_init = _SignerStub().state_init
-
-    def get_account_state(self, address: str) -> TvmAccountState:
-        self.get_account_state_calls += 1
-        return TvmAccountState(
-            address=address,
-            balance=0,
-            is_active=self._is_active,
-            is_uninitialized=not self._is_active,
-            state_init=self._signer_state_init if self._is_active else None,
-        )
-
-    def get_jetton_wallet(self, asset: str, owner: str) -> str:
-        self.get_jetton_wallet_calls.append((asset, owner))
-        if owner == _SignerStub().address:
-            return SOURCE_WALLET
-        return RECEIVER_WALLET
-
-    def emulate_trace(self, boc: bytes, *, ignore_chksig: bool = False) -> dict[str, object]:
-        _ = boc
-        self.emulate_trace_calls.append({"ignore_chksig": ignore_chksig})
-        payer = _SignerStub().address
-        source_wallet = SOURCE_WALLET
-        relay_out_hash = "relay-out-hash"
-        payer_out_hash = "payer-out-hash"
-        source_out_hash = "source-out-hash"
-        transactions = {
-            "payer": {
-                "account": payer,
-                "description": {
-                    "aborted": False,
-                    "action": {"success": True},
-                    "compute_ph": {"success": True, "skipped": False},
-                },
-                "in_msg": (
-                    {
-                        "hash": relay_out_hash,
-                        "hash_norm": relay_out_hash,
-                        "source": EMULATION_ADDRESS,
-                        "destination": payer,
-                        "decoded_opcode": "w5_internal_signed_request",
-                    }
-                    if ignore_chksig
-                    else {"decoded_opcode": "w5_external_signed_request"}
-                ),
-                "out_msgs": [{"hash": payer_out_hash, "hash_norm": payer_out_hash}],
-            },
-            "source": {
-                "account": source_wallet,
-                "account_state_before": {"balance": str(self._source_wallet_balance)},
-                "description": {
-                    "aborted": False,
-                    "action": {
-                        "success": True,
-                        **(
-                            {"total_fwd_fees": str(self._source_action_total_fwd_fees)}
-                            if self._source_action_total_fwd_fees is not None
-                            else {}
-                        ),
-                    },
-                    "compute_ph": {
-                        "success": True,
-                        "skipped": False,
-                        "gas_fees": str(self._source_wallet_compute_fee),
-                    },
-                    "storage_ph": {"storage_fees_collected": str(self._source_wallet_storage_fee)},
-                },
-                "in_msg": {
-                    "hash": payer_out_hash,
-                    "hash_norm": payer_out_hash,
-                    "source": payer,
-                    "destination": source_wallet,
-                    "decoded_opcode": "jetton_transfer",
-                },
-                "out_msgs": [
-                    {
-                        "hash": source_out_hash,
-                        "hash_norm": source_out_hash,
-                        "source": source_wallet,
-                        "destination": RECEIVER_WALLET,
-                        "decoded_opcode": "jetton_internal_transfer",
-                        "message_content": {
-                            "decoded": {
-                                "@type": "jetton_internal_transfer",
-                            }
-                        },
-                        **({"fwd_fee": str(fee)} if fee is not None else {}),
-                    }
-                    for fee in self._source_wallet_fwd_fees
-                ],
-            },
-        }
-        if not self._omit_receiver_tx:
-            transactions["receiver"] = {
-                "account": RECEIVER_WALLET,
-                "description": {
-                    "aborted": False,
-                    "action": {"success": True},
-                    "compute_ph": {
-                        "success": True,
-                        "skipped": False,
-                        "gas_fees": str(self._receiver_wallet_compute_fee),
-                    },
-                },
-                "in_msg": {
-                    "hash": source_out_hash,
-                    "hash_norm": source_out_hash,
-                    "source": source_wallet,
-                    "destination": RECEIVER_WALLET,
-                    "decoded_opcode": "jetton_internal_transfer",
-                },
-            }
-        if ignore_chksig:
-            transactions["emulation"] = {
-                "account": EMULATION_ADDRESS,
-                "description": {
-                    "aborted": False,
-                    "action": {"success": True},
-                    "compute_ph": {"success": True, "skipped": False},
-                },
-                "in_msg": {"decoded_opcode": "w5_external_signed_request"},
-                "out_msgs": [
-                    {
-                        "hash": relay_out_hash,
-                        "hash_norm": relay_out_hash,
-                        "source": EMULATION_ADDRESS,
-                        "destination": payer,
-                    }
-                ],
-            }
-        return {"transactions": transactions}
-
-
-def _make_requirements(**overrides) -> PaymentRequirements:
-    extra = {
-        "areFeesSponsored": True,
-        "forwardTonAmount": "0",
-    }
-    extra.update(overrides.pop("extra", {}))
-    return PaymentRequirements(
-        scheme="exact",
-        network=overrides.pop("network", TVM_TESTNET),
-        asset=overrides.pop("asset", ASSET),
-        amount=overrides.pop("amount", "100"),
-        pay_to=overrides.pop("pay_to", MERCHANT),
-        max_timeout_seconds=overrides.pop("max_timeout_seconds", 300),
-        extra=extra,
-        **overrides,
-    )
+def _make_requirements(**overrides):
+    return make_tvm_requirements(default_extra=SPONSORED_EXTRA, **overrides)
 
 
 class TestExactTvmClientSchemeConstructor:
     def test_should_create_instance_with_correct_scheme(self):
-        signer = _SignerStub()
+        signer = ClientSignerStub()
 
         client = ExactTvmClientScheme(signer)
 
         assert client.scheme == "exact"
 
     def test_should_store_signer_reference(self):
-        signer = _SignerStub()
+        signer = ClientSignerStub()
 
         client = ExactTvmClientScheme(signer)
 
         assert client._signer is signer
 
+    def test_close_should_close_cached_toncenter_clients(self):
+        client = ExactTvmClientScheme(ClientSignerStub())
+        testnet_client = ToncenterClientStub()
+        mainnet_client = ToncenterClientStub()
+        client._clients = {
+            TVM_TESTNET: testnet_client,
+            "tvm:-239": mainnet_client,
+        }
+
+        client.close()
+
+        assert testnet_client.close_calls == 1
+        assert mainnet_client.close_calls == 1
+        assert client._clients == {}
+
+    def test_close_should_be_idempotent(self):
+        client = ExactTvmClientScheme(ClientSignerStub())
+
+        client.close()
+        client.close()
+
 
 class TestCreatePaymentPayload:
     def test_should_have_create_payment_payload_method(self):
-        client = ExactTvmClientScheme(_SignerStub())
+        client = ExactTvmClientScheme(ClientSignerStub())
 
         assert hasattr(client, "create_payment_payload")
         assert callable(client.create_payment_payload)
 
     def test_should_reject_unsupported_network(self):
-        client = ExactTvmClientScheme(_SignerStub())
+        client = ExactTvmClientScheme(ClientSignerStub())
 
         with pytest.raises(ValueError, match="Unsupported TVM network"):
             client.create_payment_payload(_make_requirements(network="tvm:999"))
 
     def test_should_reject_requirements_for_different_signer_network(self):
-        client = ExactTvmClientScheme(_SignerStub())
+        client = ExactTvmClientScheme(ClientSignerStub())
 
         with pytest.raises(ValueError, match="Signer network .* does not match requirements"):
             client.create_payment_payload(_make_requirements(network="tvm:-239"))
 
     def test_should_require_fee_sponsorship(self):
-        client = ExactTvmClientScheme(_SignerStub())
+        client = ExactTvmClientScheme(ClientSignerStub())
 
         with pytest.raises(ValueError, match="requires extra.areFeesSponsored to be true"):
             client.create_payment_payload(_make_requirements(extra={"areFeesSponsored": False}))
 
     def test_should_create_payload_with_forward_defaults(self, monkeypatch):
-        client = ExactTvmClientScheme(_SignerStub())
-        toncenter = _ToncenterStub(
+        signer = ClientSignerStub()
+        client = ExactTvmClientScheme(signer)
+        toncenter = ToncenterClientStub(
             is_active=True,
             source_wallet_balance=1_000_000,
             source_wallet_fwd_fees=[200_000],
             source_wallet_compute_fee=300_000,
             receiver_wallet_compute_fee=400_000,
             source_wallet_storage_fee=500_000,
+            signer=signer,
         )
         monkeypatch.setattr(client, "_get_client", lambda network: toncenter)
 
@@ -301,18 +125,25 @@ class TestCreatePaymentPayload:
             200_000 + 300_000 + 400_000 + 500_000 + DEFAULT_TVM_INNER_GAS_BUFFER
         )
         assert toncenter.get_account_state_calls == 1
-        assert toncenter.get_jetton_wallet_calls == [(ASSET, _SignerStub().address)]
-        assert toncenter.emulate_trace_calls == [{"ignore_chksig": True}]
+        assert toncenter.get_jetton_wallet_calls == [(ASSET, signer.address)]
+        assert toncenter.emulate_trace_calls == [
+            {
+                "ignore_chksig": True,
+                "timeout": DEFAULT_TONCENTER_EMULATION_TIMEOUT_SECONDS,
+            }
+        ]
 
     def test_should_use_default_emulation_wallet_to_relay_into_undeployed_payer(self, monkeypatch):
-        client = ExactTvmClientScheme(_SignerStub())
-        toncenter = _ToncenterStub(
+        signer = ClientSignerStub()
+        client = ExactTvmClientScheme(signer)
+        toncenter = ToncenterClientStub(
             is_active=False,
             source_wallet_balance=1_000_000,
             source_wallet_fwd_fees=[200_000],
             source_wallet_compute_fee=300_000,
             receiver_wallet_compute_fee=400_000,
             source_wallet_storage_fee=500_000,
+            signer=signer,
         )
         monkeypatch.setattr(client, "_get_client", lambda network: toncenter)
 
@@ -321,18 +152,47 @@ class TestCreatePaymentPayload:
 
         assert settlement.transfer.source_wallet == SOURCE_WALLET
         assert toncenter.get_account_state_calls == 1
-        assert toncenter.get_jetton_wallet_calls == [(ASSET, _SignerStub().address)]
-        assert toncenter.emulate_trace_calls == [{"ignore_chksig": True}]
+        assert toncenter.get_jetton_wallet_calls == [(ASSET, signer.address)]
+        assert toncenter.emulate_trace_calls == [
+            {
+                "ignore_chksig": True,
+                "timeout": DEFAULT_TONCENTER_EMULATION_TIMEOUT_SECONDS,
+            }
+        ]
+
+    def test_should_use_signer_emulation_timeout_override(self, monkeypatch):
+        class _CustomTimeoutSigner(ClientSignerStub):
+            @property
+            def toncenter_emulation_timeout_seconds(self) -> float:
+                return 14.0
+
+        client = ExactTvmClientScheme(_CustomTimeoutSigner())
+        toncenter = ToncenterClientStub(
+            is_active=True,
+            source_wallet_balance=1_000_000,
+            source_wallet_fwd_fees=[200_000],
+            source_wallet_compute_fee=300_000,
+            receiver_wallet_compute_fee=400_000,
+            source_wallet_storage_fee=500_000,
+            signer=client._signer,
+        )
+        monkeypatch.setattr(client, "_get_client", lambda network: toncenter)
+
+        client.create_payment_payload(_make_requirements())
+
+        assert toncenter.emulate_trace_calls == [{"ignore_chksig": True, "timeout": 14.0}]
 
     def test_should_create_payload_with_custom_forward_settings(self, monkeypatch):
-        client = ExactTvmClientScheme(_SignerStub())
-        toncenter = _ToncenterStub(
+        signer = ClientSignerStub()
+        client = ExactTvmClientScheme(signer)
+        toncenter = ToncenterClientStub(
             is_active=True,
             source_wallet_balance=1_000_000,
             source_wallet_fwd_fees=[200_000, 250_000],
             source_wallet_compute_fee=300_000,
             receiver_wallet_compute_fee=400_000,
             source_wallet_storage_fee=500_000,
+            signer=signer,
         )
         monkeypatch.setattr(client, "_get_client", lambda network: toncenter)
         forward_payload = begin_cell().store_uint(0xABCD, 16).end_cell()
@@ -357,11 +217,12 @@ class TestCreatePaymentPayload:
     def test_should_raise_when_trace_does_not_include_destination_wallet_transfer(
         self, monkeypatch
     ):
-        client = ExactTvmClientScheme(_SignerStub())
+        signer = ClientSignerStub()
+        client = ExactTvmClientScheme(signer)
         monkeypatch.setattr(
             client,
             "_get_client",
-            lambda network: _ToncenterStub(
+            lambda network: ToncenterClientStub(
                 is_active=True,
                 source_wallet_balance=1_000_000,
                 source_wallet_fwd_fees=[200_000],
@@ -369,6 +230,7 @@ class TestCreatePaymentPayload:
                 receiver_wallet_compute_fee=400_000,
                 source_wallet_storage_fee=500_000,
                 omit_receiver_tx=True,
+                signer=signer,
             ),
         )
 
@@ -379,13 +241,13 @@ class TestCreatePaymentPayload:
             client.create_payment_payload(_make_requirements())
 
     def test_build_transfer_body_should_reject_negative_forward_ton_amount(self):
-        client = ExactTvmClientScheme(_SignerStub())
+        client = ExactTvmClientScheme(ClientSignerStub())
 
         with pytest.raises(ValueError, match="Forward ton amount should be >= 0"):
             client._build_transfer_body(_make_requirements(extra={"forwardTonAmount": "-1"}))
 
     def test_build_transfer_body_should_store_explicit_forward_payload(self):
-        client = ExactTvmClientScheme(_SignerStub())
+        client = ExactTvmClientScheme(ClientSignerStub())
         forward_payload = begin_cell().store_uint(0xABCD, 16).end_cell()
 
         transfer_body = client._build_transfer_body(
@@ -400,7 +262,7 @@ class TestCreatePaymentPayload:
             base64.b64encode(
                 Contract.create_internal_msg(
                     src=None,
-                    dest=Address(_SignerStub().address),
+                    dest=Address(ClientSignerStub().address),
                     bounce=True,
                     value=0,
                     body=client._build_signed_body(
@@ -420,8 +282,9 @@ class TestCreatePaymentPayload:
         assert transfer.transfer.forward_payload.hash == forward_payload.hash
 
     def test_estimate_required_inner_value_should_fallback_to_action_phase_fees(self, monkeypatch):
-        client = ExactTvmClientScheme(_SignerStub())
-        toncenter = _ToncenterStub(
+        signer = ClientSignerStub()
+        client = ExactTvmClientScheme(signer)
+        toncenter = ToncenterClientStub(
             is_active=True,
             source_wallet_balance=1_000_000,
             source_wallet_fwd_fees=[None],
@@ -429,6 +292,7 @@ class TestCreatePaymentPayload:
             receiver_wallet_compute_fee=400_000,
             source_wallet_storage_fee=500_000,
             source_action_total_fwd_fees=200_000,
+            signer=signer,
         )
         monkeypatch.setattr(client, "_get_client", lambda network: toncenter)
 

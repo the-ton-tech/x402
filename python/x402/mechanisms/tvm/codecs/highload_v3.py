@@ -91,6 +91,6 @@ def query_id_is_processed(query_state: HighloadQueryState, query_id: int) -> boo
 
 
 def _bitmap_contains(bitmap: Cell | None, bit_number: int) -> bool:
-    if bitmap is None:
+    if bitmap is None or bit_number >= len(bitmap.bits):
         return False
     return bitmap.begin_parse().skip_bits(bit_number).preload_bit() != 0

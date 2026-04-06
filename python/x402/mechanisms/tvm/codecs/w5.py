@@ -7,8 +7,8 @@ from collections.abc import Callable
 from pytoniq_core import TransactionError
 
 from ..constants import (
-    ERR_INVALID_W5_ACTIONS,
-    ERR_INVALID_W5_MESSAGE,
+    ERR_EXACT_TVM_INVALID_W5_ACTIONS,
+    ERR_EXACT_TVM_INVALID_W5_MESSAGE,
     SEND_MODE_IGNORE_ERRORS,
     SEND_MODE_PAY_FEES_SEPARATELY,
     ALLOWED_CLIENT_CODES,
@@ -68,17 +68,17 @@ def build_w5r1_state_init(public_key: bytes, wallet_id: int) -> StateInit:
 def parse_w5_init_data(state_init: StateInit) -> W5InitData:
     """Extract W5 wallet fields from StateInit data."""
     if state_init.data is None:
-        raise ValueError(ERR_INVALID_W5_MESSAGE)
+        raise ValueError(ERR_EXACT_TVM_INVALID_W5_MESSAGE)
     data = state_init.data.begin_parse()
     result = W5InitData(
-        signature_allowed=data.load_uint(1),
+        signature_allowed=data.load_bit(),
         seqno=data.load_uint(32),
         wallet_id=data.load_uint(32),
         public_key=data.load_bytes(32),
         extensions_dict=data.load_maybe_ref(),
     )
     if data.remaining_bits or data.remaining_refs:
-        raise ValueError(ERR_INVALID_W5_MESSAGE)
+        raise ValueError(ERR_EXACT_TVM_INVALID_W5_MESSAGE)
     return result
 
 
@@ -110,13 +110,13 @@ def parse_out_list(cell: Cell) -> list[OutAction]:
         n_bits = cell_slice.remaining_bits
         n_refs = cell_slice.remaining_refs
         if n_refs != 2 or n_bits != 32 + 8:
-            raise ValueError(ERR_INVALID_W5_ACTIONS)
+            raise ValueError(ERR_EXACT_TVM_INVALID_W5_ACTIONS)
 
         prev = cell_slice.load_ref().begin_parse()
         try:
             out_actions.append(OutAction.deserialize(cell_slice))
         except TransactionError as exc:
-            raise ValueError(ERR_INVALID_W5_ACTIONS) from exc
+            raise ValueError(ERR_EXACT_TVM_INVALID_W5_ACTIONS) from exc
         cell_slice = prev
 
     return out_actions

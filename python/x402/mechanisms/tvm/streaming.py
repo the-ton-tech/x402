@@ -54,9 +54,6 @@ def _iter_sse_payloads(lines: Iterable[str]) -> Iterator[str]:
             continue
         data_lines.append(line)
 
-    if data_lines:
-        yield "\n".join(data_lines)
-
 
 def _iter_sse_json_events(lines: Iterable[str]) -> Iterator[dict[str, Any]]:
     """Parse SSE JSON object payloads from text lines."""
@@ -148,6 +145,10 @@ class ToncenterStreamingWatcher:
     def is_alive(self) -> bool:
         """Report whether the watcher thread is still running."""
         return self._thread.is_alive()
+
+    def is_current_thread(self) -> bool:
+        """Report whether the caller runs on the watcher thread."""
+        return self._thread is threading.current_thread()
 
 
 class ToncenterStreamingSseClient:
@@ -333,10 +334,7 @@ class ToncenterStreamingSseClient:
                     stop_event.wait(DEFAULT_STREAMING_RECONNECT_BACKOFF_SECONDS)
         finally:
             with self._lock:
-                if (
-                    self._watcher is not None
-                    and self._watcher._thread is threading.current_thread()
-                ):
+                if self._watcher is not None and self._watcher.is_current_thread():
                     self._watcher = None
                     self._watched_address = None
 
