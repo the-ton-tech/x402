@@ -502,22 +502,6 @@ async function runTest() {
     ],
   };
 
-  const selectedProtocolFamilies = new Set(filteredScenarios.map(scenario => scenario.protocolFamily));
-  const missingRequiredEnv: string[] = [];
-  for (const family of selectedProtocolFamilies) {
-    for (const [name, value] of requiredEnvByFamily[family] || []) {
-      if (!value) {
-        missingRequiredEnv.push(name);
-      }
-    }
-  }
-
-  if (missingRequiredEnv.length > 0) {
-    errorLog('❌ Missing required environment variables for selected protocol families:');
-    missingRequiredEnv.forEach(name => errorLog(` ${name}`));
-    process.exit(1);
-  }
-
   // Apply coverage-based minimization if --min flag is set
   if (parsedArgs.minimize) {
     filteredScenarios = minimizeScenarios(filteredScenarios);
@@ -529,6 +513,22 @@ async function runTest() {
     }
   } else {
     log(`\n✅ ${filteredScenarios.length} scenarios selected`);
+  }
+
+  const selectedProtocolFamilies = new Set(filteredScenarios.map(scenario => scenario.protocolFamily));
+  const missingRequiredEnv = new Set<string>();
+  for (const family of selectedProtocolFamilies) {
+    for (const [name, value] of requiredEnvByFamily[family] || []) {
+      if (!value) {
+        missingRequiredEnv.add(name);
+      }
+    }
+  }
+
+  if (missingRequiredEnv.size > 0) {
+    errorLog('❌ Missing required environment variables for selected protocol families:');
+    Array.from(missingRequiredEnv).forEach(name => errorLog(` ${name}`));
+    process.exit(1);
   }
 
   if (selectedExtensions && selectedExtensions.length > 0) {
