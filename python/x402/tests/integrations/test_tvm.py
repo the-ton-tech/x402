@@ -37,7 +37,7 @@ from x402.mechanisms.tvm import (
     ExactTvmPayload,
     FacilitatorHighloadV3Signer,
     HighloadV3Config,
-    ToncenterV3Client,
+    ToncenterRestClient,
     WalletV5R1Config,
     WalletV5R1MnemonicSigner,
     parse_exact_tvm_payload,
@@ -127,7 +127,7 @@ def build_tvm_payment_requirements(
 
 
 def _wait_for_jetton_balance_at_least(
-    provider: ToncenterV3Client,
+    provider: ToncenterRestClient,
     jetton_wallet: str,
     expected_balance: int,
     *,
@@ -170,7 +170,7 @@ class TestTvmIntegrationV2:
         facilitator_config.toncenter_base_url = TONCENTER_BASE_URL
         self.facilitator_signer = FacilitatorHighloadV3Signer({TVM_TESTNET: facilitator_config})
 
-        self.provider = ToncenterV3Client(
+        self.provider = ToncenterRestClient(
             TVM_TESTNET,
             api_key=TONCENTER_API_KEY,
             base_url=TONCENTER_BASE_URL,

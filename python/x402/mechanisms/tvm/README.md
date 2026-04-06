@@ -93,7 +93,7 @@ facilitator.register([TVM_TESTNET], ExactTvmFacilitatorScheme(signer))
 | `FacilitatorTvmSigner`        | Protocol for facilitator signers            |
 | `WalletV5R1MnemonicSigner`    | Client signer using a W5R1 wallet           |
 | `FacilitatorHighloadV3Signer` | Facilitator signer using highload-wallet-v3 |
-| `ToncenterV3Client`           | Toncenter provider client                   |
+| `ToncenterRestClient`         | Toncenter provider client                   |
 | `TVM_MAINNET`                 | TON mainnet CAIP-2 identifier               |
 | `TVM_TESTNET`                 | TON testnet CAIP-2 identifier               |
 

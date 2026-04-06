@@ -7,8 +7,9 @@ import time
 from typing import Any
 
 from ....schemas import PaymentRequirements
-from ..codecs.common import decode_base64_boc, normalize_address
-from ..codecs.w5 import get_w5_seqno, serialize_out_list, serialize_send_msg_action
+from ..codecs.jetton import build_jetton_transfer_body
+from ..codecs.common import normalize_address
+from ..codecs.w5 import build_w5_signed_body, get_w5_seqno
 from ..constants import (
     DEFAULT_TVM_EMULATION_ADDRESS,
     DEFAULT_TVM_EMULATION_RELAY_AMOUNT,
@@ -17,7 +18,6 @@ from ..constants import (
     DEFAULT_JETTON_WALLET_MESSAGE_AMOUNT,
     DEFAULT_TONCENTER_TIMEOUT_SECONDS,
     DEFAULT_TVM_INNER_GAS_BUFFER,
-    JETTON_TRANSFER_OPCODE,
     SCHEME_EXACT,
     SEND_MODE_IGNORE_ERRORS,
     SEND_MODE_PAY_FEES_SEPARATELY,
@@ -25,7 +25,7 @@ from ..constants import (
     W5_EXTERNAL_SIGNED_OPCODE,
     W5_INTERNAL_SIGNED_OPCODE,
 )
-from ..provider import ToncenterV3Client
+from ..provider import ToncenterRestClient
 from ..signer import ClientTvmSigner
 from ..trace_utils import (
     parse_trace_transactions,
@@ -39,7 +39,7 @@ from ..types import ExactTvmPayload
 
 try:
     from pytoniq.contract.contract import Contract
-    from pytoniq_core import Address, Cell, begin_cell
+    from pytoniq_core import Address, Cell
 except ImportError as e:
     raise ImportError(
         "TVM mechanism requires pytoniq packages. Install with: pip install x402[tvm]"
@@ -53,7 +53,7 @@ class ExactTvmScheme:
 
     def __init__(self, signer: ClientTvmSigner) -> None:
         self._signer = signer
-        self._clients: dict[str, ToncenterV3Client] = {}
+        self._clients: dict[str, ToncenterRestClient] = {}
 
     def create_payment_payload(
         self,
@@ -108,9 +108,9 @@ class ExactTvmScheme:
             asset=asset,
         ).to_dict()
 
-    def _get_client(self, network: str) -> ToncenterV3Client:
+    def _get_client(self, network: str) -> ToncenterRestClient:
         if network not in self._clients:
-            self._clients[network] = ToncenterV3Client(
+            self._clients[network] = ToncenterRestClient(
                 network,
                 api_key=getattr(self._signer, "api_key", None),
                 base_url=getattr(self._signer, "base_url", None),
@@ -122,7 +122,7 @@ class ExactTvmScheme:
             )
         return self._clients[network]
 
-    def _get_jetton_wallet(self, client: ToncenterV3Client, asset: str, payer: str) -> str:
+    def _get_jetton_wallet(self, client: ToncenterRestClient, asset: str, payer: str) -> str:
         return client.get_jetton_wallet(asset, payer)
 
     def _build_w5_signed_body(
@@ -135,20 +135,14 @@ class ExactTvmScheme:
         send_mode: int = SEND_MODE_PAY_FEES_SEPARATELY,
         wallet_id: int | None = None,
     ) -> Cell:
-        actions = serialize_out_list([serialize_send_msg_action(out_message, send_mode)])
-        unsigned_body = (
-            begin_cell()
-            .store_uint(opcode, 32)
-            .store_uint(self._signer.wallet_id if wallet_id is None else wallet_id, 32)
-            .store_uint(valid_until, 32)
-            .store_uint(seqno, 32)
-            .store_maybe_ref(actions)
-            .store_bit(0)  # extra actions
-            .end_cell()
-        )
-        signature = self._signer.sign_message(unsigned_body.hash)
-        return (
-            begin_cell().store_slice(unsigned_body.begin_parse()).store_bytes(signature).end_cell()
+        return build_w5_signed_body(
+            out_message=out_message,
+            seqno=seqno,
+            valid_until=valid_until,
+            sign_message=self._signer.sign_message,
+            wallet_id=self._signer.wallet_id if wallet_id is None else wallet_id,
+            opcode=opcode,
+            send_mode=send_mode,
         )
 
     def _build_signed_body(
@@ -191,33 +185,12 @@ class ExactTvmScheme:
         return base64.b64encode(message.serialize().to_boc()).decode("utf-8")
 
     def _build_transfer_body(self, requirements: PaymentRequirements) -> Cell:
-        forward_ton_amount = int(requirements.extra.get("forwardTonAmount", 0))
-        if forward_ton_amount < 0:
-            raise ValueError("Forward ton amount should be >= 0")
-        response_destination = requirements.extra.get("responseDestination")
-
-        transfer_body = (
-            begin_cell()
-            .store_uint(JETTON_TRANSFER_OPCODE, 32)
-            .store_uint(0, 64)
-            .store_coins(int(requirements.amount))
-            .store_address(Address(requirements.pay_to))
-            .store_address(response_destination)
-            .store_bit(0)
-            .store_coins(forward_ton_amount)
-        )
-        encoded_forward_payload = requirements.extra.get("forwardPayload")
-        if encoded_forward_payload is None:
-            transfer_body = transfer_body.store_uint(0, 2)
-        else:
-            forward_payload = decode_base64_boc(encoded_forward_payload)
-            transfer_body = transfer_body.store_maybe_ref(forward_payload)
-        return transfer_body.end_cell()
+        return build_jetton_transfer_body(requirements)
 
     def _estimate_required_inner_value(
         self,
         *,
-        client: ToncenterV3Client,
+        client: ToncenterRestClient,
         source_wallet: str,
         requirements: PaymentRequirements,
         seqno: int,
@@ -292,7 +265,6 @@ class ExactTvmScheme:
                 "Trace does not contain the expected destination jetton wallet transaction"
             )
 
-        source_wallet_balance = trace_transaction_balance_before(source_wallet_tx)
         forward_fees = trace_transaction_fwd_fees(
             source_wallet_tx,
             expected_count=2 if forward_ton_amount > 0 else 1,

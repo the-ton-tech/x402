@@ -60,7 +60,7 @@ def parse_exact_tvm_payload(settlement_boc: str) -> ParsedTvmSettlement:
         raise ValueError(ERR_INVALID_W5_ACTIONS)
 
     action = actions[0]
-    if not action.out_msg.is_internal or action.out_msg.info.dest is None:
+    if not action.out_msg.is_internal or action.out_msg.info.dest is None or not action.out_msg.info.bounce:
         raise ValueError(ERR_INVALID_W5_ACTIONS)
 
     allowed_send_modes = {

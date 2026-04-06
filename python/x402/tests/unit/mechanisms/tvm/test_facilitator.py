@@ -13,6 +13,7 @@ from pytoniq_core import begin_cell
 
 import x402.mechanisms.tvm.exact.facilitator as facilitator_module
 from x402.mechanisms.tvm import (
+    ERR_ACCOUNT_FROZEN,
     ERR_DUPLICATE_SETTLEMENT,
     ERR_INVALID_AMOUNT,
     ERR_INVALID_ASSET,
@@ -62,9 +63,10 @@ class _FakeBatcher:
         flush_interval_seconds: float,
         batch_flush_size: int,
         confirmation_timeout_seconds: float,
+        settlement_verifier,
     ) -> None:
         _ = signer, settlement_cache, flush_interval_seconds, batch_flush_size
-        _ = confirmation_timeout_seconds
+        _ = confirmation_timeout_seconds, settlement_verifier
         self.enqueued: list[object] = []
         self.result = facilitator_module._BatchResult(success=True, transaction="trace-tx-hash")
         self.error: Exception | None = None
@@ -82,6 +84,7 @@ class _SignerStub:
             address=PAYER,
             balance=0,
             is_active=True,
+            is_frozen=False,
             is_uninitialized=False,
             state_init=None,
         )
@@ -389,6 +392,23 @@ class TestVerify:
 
         assert result.is_valid is False
         assert result.invalid_reason == ERR_INVALID_SIGNATURE
+
+    def test_should_reject_frozen_account_state(self, facilitator_env):
+        facilitator = facilitator_env["facilitator"]
+        signer = facilitator_env["signer"]
+        signer.account_state = TvmAccountState(
+            address=PAYER,
+            balance=0,
+            is_active=False,
+            is_frozen=True,
+            is_uninitialized=False,
+            state_init=None,
+        )
+
+        result = facilitator.verify(_make_payload(), _make_requirements())
+
+        assert result.is_valid is False
+        assert result.invalid_reason == ERR_ACCOUNT_FROZEN
 
     def test_should_return_valid_response_for_matching_payload(self, facilitator_env):
         facilitator = facilitator_env["facilitator"]

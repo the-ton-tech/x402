@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from pytoniq_core import TransactionError
 
 from ..constants import (
@@ -9,7 +11,7 @@ from ..constants import (
     ERR_INVALID_W5_MESSAGE,
     SEND_MODE_IGNORE_ERRORS,
     SEND_MODE_PAY_FEES_SEPARATELY,
-    W5R1_CODE_HASH,
+    ALLOWED_CLIENT_CODES,
     W5R1_CODE_HEX,
 )
 from ..types import TvmAccountState, W5InitData
@@ -50,8 +52,6 @@ def address_from_state_init(state_init: StateInit, workchain: int) -> str:
 def build_w5r1_state_init(public_key: bytes, wallet_id: int) -> StateInit:
     """Build a W5R1 wallet StateInit for a client wallet."""
     code = Cell.one_from_boc(bytes.fromhex(W5R1_CODE_HEX))
-    if code.hash.hex() != W5R1_CODE_HASH:
-        raise ValueError("Unexpected W5R1 code hash")
 
     data = (
         begin_cell()
@@ -90,7 +90,7 @@ def parse_active_w5_account_state(account_state: TvmAccountState) -> W5InitData:
         or account_state.state_init.code is None
     ):
         raise RuntimeError(f"Account {account_state.address} does not have active W5 state")
-    if account_state.state_init.code.hash.hex() != W5R1_CODE_HASH:
+    if account_state.state_init.code.hash.hex() not in ALLOWED_CLIENT_CODES:
         raise RuntimeError(f"Account {account_state.address} is not a W5R1 wallet")
     return parse_w5_init_data(account_state.state_init)
 
@@ -135,6 +135,32 @@ def serialize_out_list(actions: list[Cell]) -> Cell:
     for action in actions:
         out_list = begin_cell().store_ref(out_list).store_cell(action).end_cell()
     return out_list
+
+
+def build_w5_signed_body(
+    *,
+    out_message: Cell,
+    seqno: int,
+    valid_until: int,
+    sign_message: Callable[[bytes], bytes],
+    wallet_id: int,
+    opcode: int,
+    send_mode: int = SEND_MODE_PAY_FEES_SEPARATELY,
+) -> Cell:
+    """Build and sign a W5 request body for a single outgoing message."""
+    actions = serialize_out_list([serialize_send_msg_action(out_message, send_mode)])
+    unsigned_body = (
+        begin_cell()
+        .store_uint(opcode, 32)
+        .store_uint(wallet_id, 32)
+        .store_uint(valid_until, 32)
+        .store_uint(seqno, 32)
+        .store_maybe_ref(actions)
+        .store_bit(0)
+        .end_cell()
+    )
+    signature = sign_message(unsigned_body.hash)
+    return begin_cell().store_slice(unsigned_body.begin_parse()).store_bytes(signature).end_cell()
 
 
 def verify_w5_signature(public_key: bytes, signed_slice_hash: bytes, signature: bytes) -> bool:

@@ -6,8 +6,10 @@ from .codecs.common import (
     parse_amount,
     parse_money_to_decimal,
 )
+from .codecs.jetton import build_jetton_transfer_body, build_jetton_transfer_body_fields
 from .codecs.w5 import (
     address_from_state_init,
+    build_w5_signed_body,
     build_w5r1_state_init,
     make_w5r1_wallet_id,
     verify_w5_signature,
@@ -26,6 +28,7 @@ from .constants import (
     ERR_DUPLICATE_SETTLEMENT,
     ERR_INSUFFICIENT_BALANCE,
     ERR_INVALID_AMOUNT,
+    ERR_ACCOUNT_FROZEN,
     ERR_INVALID_ASSET,
     ERR_INVALID_CODE_HASH,
     ERR_INVALID_JETTON_TRANSFER,
@@ -54,11 +57,11 @@ from .constants import (
     USDT_MAINNET_MINTER,
     USDT_TESTNET_MINTER,
     W5_INTERNAL_SIGNED_OPCODE,
-    W5R1_CODE_HASH,
+    ALLOWED_CLIENT_CODES,
     W5R1_CODE_HEX,
 )
 from .exact.codec import parse_exact_tvm_payload
-from .provider import ToncenterV3Client
+from .provider import ToncenterRestClient
 from .settlement_cache import SettlementCache
 from .signer import ClientTvmSigner, FacilitatorTvmSigner
 from .signers import (
@@ -98,7 +101,7 @@ __all__ = [
     "JETTON_TRANSFER_OPCODE",
     "W5_INTERNAL_SIGNED_OPCODE",
     "W5R1_CODE_HEX",
-    "W5R1_CODE_HASH",
+    "ALLOWED_CLIENT_CODES",
     "HIGHLOAD_V3_CODE_HASH",
     "ERR_UNSUPPORTED_SCHEME",
     "ERR_UNSUPPORTED_NETWORK",
@@ -113,6 +116,7 @@ __all__ = [
     "ERR_INVALID_ASSET",
     "ERR_INVALID_RECIPIENT",
     "ERR_INVALID_AMOUNT",
+    "ERR_ACCOUNT_FROZEN",
     "ERR_INVALID_SEQNO",
     "ERR_INVALID_UNTIL_EXPIRED",
     "ERR_VALID_UNTIL_TOO_FAR",
@@ -126,7 +130,7 @@ __all__ = [
     "WalletV5R1MnemonicSigner",
     "FacilitatorHighloadV3Signer",
     "HighloadV3Config",
-    "ToncenterV3Client",
+    "ToncenterRestClient",
     "SettlementCache",
     "ExactTvmPayload",
     "ParsedJettonTransfer",
@@ -135,6 +139,9 @@ __all__ = [
     "TvmJettonWalletData",
     "TvmRelayRequest",
     "address_from_state_init",
+    "build_jetton_transfer_body",
+    "build_jetton_transfer_body_fields",
+    "build_w5_signed_body",
     "build_w5r1_state_init",
     "get_network_global_id",
     "make_w5r1_wallet_id",

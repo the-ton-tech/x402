@@ -28,6 +28,7 @@ from .constants import (
     DEFAULT_HIGHLOAD_SUBWALLET_ID,
     DEFAULT_HIGHLOAD_TIMEOUT,
     DEFAULT_RELAY_AMOUNT,
+    DEFAULT_STREAMING_CONFIRMATION_GRACE_SECONDS,
     DEFAULT_TONCENTER_TIMEOUT_SECONDS,
     DEFAULT_W5R1_SUBWALLET_NUMBER,
     HIGHLOAD_V3_CODE_HASH,
@@ -37,7 +38,7 @@ from .constants import (
     TVM_MAINNET,
     TVM_TESTNET,
 )
-from .provider import ToncenterV3Client
+from .provider import ToncenterRestClient
 from .streaming import ToncenterStreamingSseClient, ToncenterStreamingWatcher
 from .types import TvmAccountState, TvmJettonWalletData, TvmRelayRequest
 
@@ -54,7 +55,6 @@ except ImportError as e:
     ) from e
 
 
-DEFAULT_TRACE_FETCH_ATTEMPTS = 3
 DEFAULT_TRACE_FETCH_BACKOFF_SECONDS = 0.5
 
 
@@ -243,9 +243,10 @@ class FacilitatorHighloadV3Signer:
 
     def __init__(self, configs: dict[str, HighloadV3Config]) -> None:
         self._configs = dict(configs)
-        self._clients: dict[str, ToncenterV3Client] = {}
+        self._clients: dict[str, ToncenterRestClient] = {}
         self._streaming_clients: dict[str, ToncenterStreamingSseClient] = {}
         self._streaming_watchers: dict[str, ToncenterStreamingWatcher] = {}
+        self._streaming_watcher_startups: dict[str, threading.Event] = {}
         self._cached_facilitator_states: dict[str, TvmAccountState] = {}
         self._facilitator_state_dirty: dict[str, bool] = {}
         self._wallets: dict[str, _WalletContext] = {}
@@ -402,7 +403,10 @@ class FacilitatorHighloadV3Signer:
 
         if self._ensure_streaming_watcher(network):
             try:
-                remaining = max(0.0, deadline - time.monotonic())
+                remaining = min(
+                    DEFAULT_STREAMING_CONFIRMATION_GRACE_SECONDS,
+                    max(0.0, deadline - time.monotonic()),
+                )
                 self._streaming_client(network).wait_for_trace_confirmation(
                     trace_external_hash_norm=trace_external_hash_norm,
                     timeout_seconds=remaining,
@@ -428,7 +432,7 @@ class FacilitatorHighloadV3Signer:
         """Read TEP-74 jetton wallet data."""
         return self._client(network).get_jetton_wallet_data(address)
 
-    def _client(self, network: str) -> ToncenterV3Client:
+    def _client(self, network: str) -> ToncenterRestClient:
         client = self._clients.get(network)
         if client is not None:
             return client
@@ -437,7 +441,7 @@ class FacilitatorHighloadV3Signer:
             client = self._clients.get(network)
             if client is None:
                 config = self._configs[network]
-                client = ToncenterV3Client(
+                client = ToncenterRestClient(
                     network,
                     api_key=config.api_key,
                     base_url=config.toncenter_base_url,
@@ -480,21 +484,44 @@ class FacilitatorHighloadV3Signer:
         return refreshed_state
 
     def _ensure_streaming_watcher(self, network: str) -> bool:
+        startup_event: threading.Event | None = None
+        should_start = False
         with self._lock:
             existing_watcher = self._streaming_watchers.get(network)
             if existing_watcher is not None and existing_watcher.is_alive():
                 return True
             if existing_watcher is not None:
                 self._streaming_watchers.pop(network, None)
-            try:
-                watcher = self._streaming_client(network).start_account_state_watcher(
-                    address=self._wallets[network].address,
-                    on_invalidate=lambda: self._mark_facilitator_state_dirty(network),
-                )
-            except Exception:
-                return False
-            self._streaming_watchers[network] = watcher
-            return True
+            startup_event = self._streaming_watcher_startups.get(network)
+            if startup_event is None:
+                startup_event = threading.Event()
+                self._streaming_watcher_startups[network] = startup_event
+                should_start = True
+
+        if not should_start:
+            assert startup_event is not None
+            startup_event.wait()
+            with self._lock:
+                existing_watcher = self._streaming_watchers.get(network)
+                return existing_watcher is not None and existing_watcher.is_alive()
+
+        watcher: ToncenterStreamingWatcher | None = None
+        try:
+            watcher = self._streaming_client(network).start_account_state_watcher(
+                address=self._wallets[network].address,
+                on_invalidate=lambda: self._mark_facilitator_state_dirty(network),
+            )
+        except Exception:
+            watcher = None
+        finally:
+            assert startup_event is not None
+            with self._lock:
+                if watcher is not None:
+                    self._streaming_watchers[network] = watcher
+                self._streaming_watcher_startups.pop(network, None)
+                startup_event.set()
+
+        return watcher is not None
 
     def _mark_facilitator_state_dirty(self, network: str) -> None:
         with self._lock:
@@ -525,12 +552,13 @@ class FacilitatorHighloadV3Signer:
 
     def _select_query_id(self, network: str, for_emulation: bool) -> int:
         """Pick a free HighloadV3 QueryID from the local monotonic seqno cursor."""
+        wallet_context = self._wallets[network]
+        query_state = load_highload_query_state(
+            self.get_account_state(wallet_context.address, network),
+            expected_code_hash=HIGHLOAD_V3_CODE_HASH,
+        )
         with self._lock:
             wallet_context = self._wallets[network]
-            query_state = load_highload_query_state(
-                self.get_account_state(wallet_context.address, network),
-                expected_code_hash=HIGHLOAD_V3_CODE_HASH,
-            )
             wallet_context.deployed = query_state is not None
             attempts = MAX_USABLE_QUERY_SEQNO + 1
             next_seqno = self._query_ids[network]

@@ -14,7 +14,7 @@ from pytoniq_core import Address, begin_cell
 
 import x402.mechanisms.tvm.provider as provider_module
 from x402.mechanisms.tvm import TVM_MAINNET, TVM_TESTNET
-from x402.mechanisms.tvm.provider import ToncenterV3Client, _default_base_url
+from x402.mechanisms.tvm.provider import ToncenterRestClient, _default_base_url
 
 
 def _cell_b64(value: int) -> str:
@@ -71,9 +71,9 @@ class TestDefaultBaseUrl:
             _default_base_url("tvm:123")
 
 
-class TestToncenterV3ClientParsing:
+class TestToncenterRestClientParsing:
     def test_emulate_trace_should_forward_ignore_chksig_flag(self):
-        client = ToncenterV3Client(TVM_TESTNET)
+        client = ToncenterRestClient(TVM_TESTNET)
         fake_http = _FakeHttpClient(
             [_json_response(200, {"transactions": {}}, path="/api/emulate/v1/emulateTrace")]
         )
@@ -89,7 +89,7 @@ class TestToncenterV3ClientParsing:
         assert kwargs["json"]["with_actions"] is True
 
     def test_get_account_state_should_decode_active_state_init(self):
-        client = ToncenterV3Client(TVM_TESTNET)
+        client = ToncenterRestClient(TVM_TESTNET)
         client._client = _FakeHttpClient(
             [
                 _json_response(
@@ -119,7 +119,7 @@ class TestToncenterV3ClientParsing:
         assert account.state_init is not None
 
     def test_get_account_state_should_decode_uninitialized_account_without_state_init(self):
-        client = ToncenterV3Client(TVM_TESTNET)
+        client = ToncenterRestClient(TVM_TESTNET)
         client._client = _FakeHttpClient(
             [
                 _json_response(
@@ -145,7 +145,7 @@ class TestToncenterV3ClientParsing:
         assert account.state_init is None
 
     def test_run_get_method_should_reject_non_zero_exit_code(self):
-        client = ToncenterV3Client(TVM_TESTNET)
+        client = ToncenterRestClient(TVM_TESTNET)
         client._client = _FakeHttpClient(
             [_json_response(200, {"exit_code": 1, "stack": []}, path="/api/v3/runGetMethod")]
         )
@@ -154,7 +154,7 @@ class TestToncenterV3ClientParsing:
             client.run_get_method("0:" + "1" * 64, "method", [])
 
     def test_run_get_method_should_reject_non_list_stack(self):
-        client = ToncenterV3Client(TVM_TESTNET)
+        client = ToncenterRestClient(TVM_TESTNET)
         client._client = _FakeHttpClient(
             [_json_response(200, {"exit_code": 0, "stack": {}}, path="/api/v3/runGetMethod")]
         )
@@ -165,7 +165,7 @@ class TestToncenterV3ClientParsing:
     def test_should_parse_stack_helpers_and_jetton_wallet_data(self):
         owner = "0:" + "2" * 64
         minter = "0:" + "3" * 64
-        client = ToncenterV3Client(TVM_TESTNET)
+        client = ToncenterRestClient(TVM_TESTNET)
         client._client = _FakeHttpClient(
             [
                 _json_response(
@@ -190,7 +190,7 @@ class TestToncenterV3ClientParsing:
         assert data.jetton_minter == minter
 
     def test_get_trace_by_message_hash_should_reject_malformed_response(self):
-        client = ToncenterV3Client(TVM_TESTNET)
+        client = ToncenterRestClient(TVM_TESTNET)
         client._client = _FakeHttpClient(
             [_json_response(200, {"traces": {}}, path="/api/v3/traces")]
         )
@@ -199,7 +199,7 @@ class TestToncenterV3ClientParsing:
             client.get_trace_by_message_hash("hash-1")
 
     def test_get_trace_by_message_hash_should_reject_empty_traces(self):
-        client = ToncenterV3Client(TVM_TESTNET)
+        client = ToncenterRestClient(TVM_TESTNET)
         client._client = _FakeHttpClient(
             [_json_response(200, {"traces": []}, path="/api/v3/traces")]
         )
@@ -210,7 +210,7 @@ class TestToncenterV3ClientParsing:
 
 class TestToncenterRequestRetries:
     def test_should_retry_retryable_http_statuses(self, monkeypatch):
-        client = ToncenterV3Client(TVM_TESTNET)
+        client = ToncenterRestClient(TVM_TESTNET)
         fake_client = _FakeHttpClient(
             [
                 _json_response(500, {"error": "boom"}, path="/api/test", text="boom"),
@@ -228,7 +228,7 @@ class TestToncenterRequestRetries:
         assert sleeps == [0.25]
 
     def test_should_honor_retry_after_header(self, monkeypatch):
-        client = ToncenterV3Client(TVM_TESTNET)
+        client = ToncenterRestClient(TVM_TESTNET)
         fake_client = _FakeHttpClient(
             [
                 _json_response(
@@ -251,7 +251,7 @@ class TestToncenterRequestRetries:
         assert sleeps == [1.5]
 
     def test_should_not_retry_non_retryable_http_statuses(self):
-        client = ToncenterV3Client(TVM_TESTNET)
+        client = ToncenterRestClient(TVM_TESTNET)
         fake_client = _FakeHttpClient(
             [_json_response(400, {"error": "bad"}, path="/api/test", text="bad")]
         )
@@ -263,7 +263,7 @@ class TestToncenterRequestRetries:
         assert len(fake_client.calls) == 1
 
     def test_should_retry_transport_errors_then_raise_last_error(self, monkeypatch):
-        client = ToncenterV3Client(TVM_TESTNET)
+        client = ToncenterRestClient(TVM_TESTNET)
         fake_client = _FakeHttpClient(
             [
                 httpx.RequestError(
@@ -281,7 +281,7 @@ class TestToncenterRequestRetries:
         assert len(fake_client.calls) == 5
 
     def test_should_reject_non_object_json_payloads(self):
-        client = ToncenterV3Client(TVM_TESTNET)
+        client = ToncenterRestClient(TVM_TESTNET)
         client._client = _FakeHttpClient(
             [_json_response(200, ["not", "an", "object"], path="/api/test")]
         )

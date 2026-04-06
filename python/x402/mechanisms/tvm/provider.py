@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 _MAX_LOGGED_RESPONSE_BODY_LENGTH = 512
 
 
-class ToncenterV3Client:
+class ToncenterRestClient:
     """Minimal Toncenter v3 client used by the TVM mechanism."""
 
     def __init__(
@@ -75,6 +75,7 @@ class ToncenterV3Client:
             balance=int(account.get("balance") or 0),
             is_active=status == "active",
             is_uninitialized=status in {"uninit", "nonexist"},
+            is_frozen=status == "frozen",
             state_init=state_init,
         )
 

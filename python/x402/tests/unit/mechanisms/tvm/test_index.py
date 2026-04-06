@@ -18,7 +18,7 @@ from x402.mechanisms.tvm import (
     FacilitatorHighloadV3Signer,
     FacilitatorTvmSigner,
     SettlementCache,
-    ToncenterV3Client,
+    ToncenterRestClient,
     WalletV5R1MnemonicSigner,
     get_network_global_id,
     normalize_address,
@@ -73,7 +73,7 @@ class TestExports:
         assert FacilitatorHighloadV3Signer is not None
 
     def test_should_export_provider_and_payload_types(self):
-        assert ToncenterV3Client is not None
+        assert ToncenterRestClient is not None
         assert ExactTvmPayload is not None
         assert SettlementCache is not None
 

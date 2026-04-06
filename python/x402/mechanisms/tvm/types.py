@@ -75,6 +75,7 @@ class TvmAccountState:
     balance: int
     is_active: bool
     is_uninitialized: bool
+    is_frozen: bool
     state_init: StateInit | None
 
 
