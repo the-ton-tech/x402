@@ -48,11 +48,11 @@ pnpm test
 ```
 
 Launches an interactive CLI where you can select:
-- **Facilitators** - Payment verification/settlement services (Go, TypeScript)
+- **Facilitators** - Payment verification/settlement services (Go, TypeScript, Python)
 - **Servers** - Protected endpoints requiring payment (Express, Gin, Hono, Next.js, FastAPI, Flask, etc.)
 - **Clients** - Payment-capable HTTP clients (axios, fetch, httpx, requests, etc.)
 - **Extensions** - Additional features like Bazaar discovery
-- **Protocols** - EVM, SVM, and/or Aptos networks
+- **Protocols** - EVM, SVM, Aptos, Stellar, and/or TVM networks
 
 Every valid combination of your selections will be tested. For example, selecting 2 facilitators, 3 servers, and 2 clients will generate and run all compatible test scenarios.
 
@@ -115,18 +115,24 @@ CLIENT_EVM_PRIVATE_KEY=0x...        # EVM private key for client payments
 CLIENT_SVM_PRIVATE_KEY=...          # Solana private key for client payments
 CLIENT_APTOS_PRIVATE_KEY=...        # Aptos private key for client payments (hex string)
 CLIENT_STELLAR_PRIVATE_KEY=...      # Stellar private key for client payments
+CLIENT_TVM_PRIVATE_KEY=...          # TVM private key for client payments
 
 # Server payment addresses
 SERVER_EVM_ADDRESS=0x...            # Where servers receive EVM payments
 SERVER_SVM_ADDRESS=...              # Where servers receive Solana payments
 SERVER_APTOS_ADDRESS=0x...          # Where servers receive Aptos payments
 SERVER_STELLAR_ADDRESS=...          # Where servers receive Stellar payments
+SERVER_TVM_ADDRESS=...              # Where servers receive TVM payments
 
 # Facilitator wallets (⚠️ TEST WALLETS ONLY — used to fund/drain client between tests)
 FACILITATOR_EVM_PRIVATE_KEY=0x...   # EVM private key for facilitator
 FACILITATOR_SVM_PRIVATE_KEY=...     # Solana private key for facilitator
 FACILITATOR_APTOS_PRIVATE_KEY=...   # Aptos private key for facilitator (hex string)
 FACILITATOR_STELLAR_PRIVATE_KEY=... # Stellar private key for facilitator
+FACILITATOR_TVM_PRIVATE_KEY=...     # TVM private key for facilitator
+
+# TVM support
+TONCENTER_API_KEY=...               # Recommended for TVM client/facilitator access
 ```
 
 ### Account Setup Instructions
@@ -153,7 +159,7 @@ $ pnpm test --min
 ✔ Select servers › express, hono, legacy-express
 ✔ Select clients › axios, fetch, httpx
 ✔ Select extensions › bazaar
-✔ Select protocol families › EVM, SVM, Aptos, Stellar
+✔ Select protocol families › EVM, SVM, Aptos, Stellar, TVM
 
 📊 Coverage-Based Minimization
 Total scenarios: 156
