@@ -50,9 +50,7 @@ def validate_environment() -> tuple[str | None, str | None, str | None, str, str
 
     # Validate at least one signer credential is provided
     if not evm_private_key and not svm_private_key and not tvm_private_key:
-        print(
-            "❌ At least one of EVM_PRIVATE_KEY, SVM_PRIVATE_KEY, or TVM_PRIVATE_KEY is required"
-        )
+        print("❌ At least one of EVM_PRIVATE_KEY, SVM_PRIVATE_KEY, or TVM_PRIVATE_KEY is required")
         print("Please copy .env-local to .env and fill in the values.")
         sys.exit(1)
 

@@ -21,6 +21,7 @@ from x402.mechanisms.tvm import (
 from x402.mechanisms.tvm.constants import (
     DEFAULT_TVM_OUTER_GAS_BUFFER,
     ERR_EXACT_TVM_ACCOUNT_FROZEN,
+    ERR_EXACT_TVM_TON_AMOUNT_TOO_HIGH,
     ERR_EXACT_TVM_DUPLICATE_SETTLEMENT,
     ERR_EXACT_TVM_INVALID_AMOUNT,
     ERR_EXACT_TVM_INVALID_ASSET,
@@ -36,17 +37,16 @@ from x402.mechanisms.tvm.constants import (
     ERR_EXACT_TVM_UNSUPPORTED_SCHEME,
     ERR_EXACT_TVM_UNSUPPORTED_VERSION,
     ERR_EXACT_TVM_VALID_UNTIL_TOO_FAR,
+    MAX_TVM_INNER_GAS_OVERHEAD,
 )
 from x402.mechanisms.tvm.exact import ExactTvmFacilitatorScheme
 from x402.mechanisms.tvm.trace_utils import body_hash_to_base64
+
 from .builders import (
     ASSET,
     FACILITATOR,
-    MERCHANT,
     PAYER,
     SOURCE_WALLET,
-    EMPTY_FORWARD_PAYLOAD,
-    EMPTY_FORWARD_PAYLOAD_B64,
     SPONSORED_FORWARDING_EXTRA,
     make_tvm_payload,
     make_tvm_requirements,
@@ -154,7 +154,18 @@ def facilitator_env(monkeypatch):
     monkeypatch.setattr(
         facilitator_module,
         "trace_transaction_fwd_fees",
-        lambda tx: 30_000,
+        lambda tx, **kwargs: 30_000,
+    )
+    monkeypatch.setattr(
+        ExactTvmFacilitatorScheme,
+        "_trace_settlement_transactions",
+        staticmethod(
+            lambda *args, **kwargs: (
+                {"hash": "payer-tx"},
+                {"hash": "source-tx"},
+                {"hash": "receiver-tx"},
+            )
+        ),
     )
     monkeypatch.setattr(
         ExactTvmFacilitatorScheme,
@@ -274,6 +285,22 @@ class TestVerify:
         result = facilitator.verify(_make_payload(), _make_requirements())
 
         _assert_invalid_verify(result, ERR_EXACT_TVM_INVALID_JETTON_TRANSFER)
+
+    def test_should_reject_attached_ton_amount_above_reasonable_cap(
+        self, facilitator_env, monkeypatch
+    ):
+        facilitator = facilitator_env.facilitator
+        monkeypatch.setattr(
+            facilitator_module,
+            "parse_exact_tvm_payload",
+            lambda boc: make_tvm_settlement(
+                attached_ton_amount=MAX_TVM_INNER_GAS_OVERHEAD + 1,
+            ),
+        )
+
+        result = facilitator.verify(_make_payload(), _make_requirements())
+
+        _assert_invalid_verify(result, ERR_EXACT_TVM_TON_AMOUNT_TOO_HIGH)
 
     def test_should_reject_payload_missing_settlement_boc(self, facilitator_env):
         facilitator = facilitator_env.facilitator
