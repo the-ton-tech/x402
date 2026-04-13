@@ -11,10 +11,8 @@ This directory contains advanced x402 client examples demonstrating hooks, custo
   - TVM private key with TON testnet funds and testnet USDT
 - A running x402 resource server (e.g., the FastAPI example server)
 
-For TVM funding, use [@testgiver_ton_bot](https://t.me/testgiver_ton_bot) for testnet TON. After receiving TON, perform the following transaction to receive testnet-USDT (follow the link or scan the QR):
-ton://transfer/kQDNUDJC0iQvJoZp0ml-YteL1NtTXKphU03CTI5v4VtBhGYs?amount=49000000&bin=te6cckEBAQEAFgAAKClXdJkAAAAAAAAAAAAAAAAAmJaAhDUekg
-<img width="228" height="228" alt="ton://transfer/kQDNUDJC0iQvJoZp0ml-YteL1NtTXKphU03CTI5v4VtBhGYs?amount=49000000&bin=te6cckEBAQEAFgAAKClXdJkAAAAAAAAAAAAAAAAAmJaAhDUekg" src="https://github.com/user-attachments/assets/da09ad03-388d-4960-88bf-afbacf4a7c65" />
-
+To fund your TVM payer wallet, request testnet TON from [@testgiver_ton_bot](https://t.me/testgiver_ton_bot) for fees. Then open the [testnet USDT transfer link](ton://transfer/kQDNUDJC0iQvJoZp0ml-YteL1NtTXKphU03CTI5v4VtBhGYs?amount=49000000&bin=te6cckEBAQEAFgAAKClXdJkAAAAAAAAAAAAAAAAAmJaAhDUekg) or scan the QR code below to obtain testnet USDT:
+<img width="228" height="228" alt="QR code for the testnet USDT transfer link" src="https://github.com/user-attachments/assets/da09ad03-388d-4960-88bf-afbacf4a7c65" />
 
 ## Setup
 
