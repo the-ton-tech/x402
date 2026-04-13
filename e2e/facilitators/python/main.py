@@ -43,7 +43,7 @@ from x402.mechanisms.tvm import (
     HighloadV3Config,
     FacilitatorHighloadV3Signer,
 )
-from x402.mechanisms.tvm.exact import register_exact_tvm_facilitator
+from x402.mechanisms.tvm.exact import ExactTvmFacilitatorScheme
 
 from bazaar import BazaarCatalog
 
@@ -124,22 +124,30 @@ class Erc20ApprovalSigner:
 
                 payer_address = w3.eth.account.recover_transaction(tx)
                 # Use the same gas constants as the library's approve tx builder
-                gas_cost = 70_000 * 1_000_000_000  # ERC20_APPROVE_GAS_LIMIT * DEFAULT_MAX_FEE_PER_GAS
+                gas_cost = (
+                    70_000 * 1_000_000_000
+                )  # ERC20_APPROVE_GAS_LIMIT * DEFAULT_MAX_FEE_PER_GAS
 
                 payer_balance = w3.eth.get_balance(payer_address)
                 if payer_balance < gas_cost:
                     deficit = gas_cost - payer_balance
-                    print(f"⛽ Funding payer {payer_address} with {deficit} wei for gas")
+                    print(
+                        f"⛽ Funding payer {payer_address} with {deficit} wei for gas"
+                    )
                     fund_tx = {
                         "to": payer_address,
                         "value": deficit,
                         "gas": 21000,
                         "gasPrice": w3.eth.gas_price,
-                        "nonce": w3.eth.get_transaction_count(self._signer._account.address),
+                        "nonce": w3.eth.get_transaction_count(
+                            self._signer._account.address
+                        ),
                         "chainId": w3.eth.chain_id,
                     }
                     signed_fund = self._signer._account.sign_transaction(fund_tx)
-                    fund_hash = w3.eth.send_raw_transaction(signed_fund.raw_transaction).hex()
+                    fund_hash = w3.eth.send_raw_transaction(
+                        signed_fund.raw_transaction
+                    ).hex()
                     fund_receipt = w3.eth.wait_for_transaction_receipt(fund_hash)
                     if fund_receipt["status"] != 1:
                         raise RuntimeError(f"gas_funding_failed: {fund_hash}")
@@ -244,10 +252,9 @@ if svm_signer is not None:
 
 # Register TVM schemes (V2)
 if tvm_signer is not None:
-    register_exact_tvm_facilitator(
-        facilitator,
-        tvm_signer,
-        networks=TVM_NETWORK,
+    facilitator.register(
+        [TVM_NETWORK],
+        ExactTvmFacilitatorScheme(tvm_signer),
     )
 
 # Register gas sponsoring extensions

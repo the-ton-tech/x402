@@ -27,7 +27,7 @@ from x402.mechanisms.tvm import (
     WalletV5R1Config,
     WalletV5R1MnemonicSigner,
 )
-from x402.mechanisms.tvm.exact.register import register_exact_tvm_client
+from x402.mechanisms.tvm.exact import ExactTvmClientScheme
 
 # Load environment variables
 load_dotenv()
@@ -106,7 +106,7 @@ async def main() -> None:
         tvm_config.api_key = os.getenv("TONCENTER_API_KEY")
         tvm_config.base_url = os.getenv("TONCENTER_BASE_URL")
         tvm_signer = WalletV5R1MnemonicSigner(tvm_config)
-        register_exact_tvm_client(client, tvm_signer)
+        client.register(tvm_network, ExactTvmClientScheme(tvm_signer))
         print(f"Initialized TVM account: {tvm_signer.address}")
 
     # Create HTTP client helper for payment response extraction
