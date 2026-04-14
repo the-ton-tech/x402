@@ -19,6 +19,7 @@ from x402.mechanisms.tvm import (
     TvmAccountState,
 )
 from x402.mechanisms.tvm.constants import (
+    DEFAULT_JETTON_WALLET_MESSAGE_AMOUNT,
     DEFAULT_TVM_OUTER_GAS_BUFFER,
     ERR_EXACT_TVM_ACCOUNT_FROZEN,
     ERR_EXACT_TVM_TON_AMOUNT_TOO_HIGH,
@@ -37,7 +38,6 @@ from x402.mechanisms.tvm.constants import (
     ERR_EXACT_TVM_UNSUPPORTED_SCHEME,
     ERR_EXACT_TVM_UNSUPPORTED_VERSION,
     ERR_EXACT_TVM_VALID_UNTIL_TOO_FAR,
-    MAX_TVM_INNER_GAS_OVERHEAD,
 )
 from x402.mechanisms.tvm.exact import ExactTvmFacilitatorScheme
 from x402.mechanisms.tvm.trace_utils import body_hash_to_base64
@@ -155,17 +155,6 @@ def facilitator_env(monkeypatch):
         facilitator_module,
         "trace_transaction_fwd_fees",
         lambda tx, **kwargs: 30_000,
-    )
-    monkeypatch.setattr(
-        ExactTvmFacilitatorScheme,
-        "_trace_settlement_transactions",
-        staticmethod(
-            lambda *args, **kwargs: (
-                {"hash": "payer-tx"},
-                {"hash": "source-tx"},
-                {"hash": "receiver-tx"},
-            )
-        ),
     )
     monkeypatch.setattr(
         ExactTvmFacilitatorScheme,
@@ -294,7 +283,7 @@ class TestVerify:
             facilitator_module,
             "parse_exact_tvm_payload",
             lambda boc: make_tvm_settlement(
-                attached_ton_amount=MAX_TVM_INNER_GAS_OVERHEAD + 1,
+                attached_ton_amount=DEFAULT_JETTON_WALLET_MESSAGE_AMOUNT + 1,
             ),
         )
 
